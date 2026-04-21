@@ -37,7 +37,9 @@ latches `invalid_mode` sticky.
 | `clk_mcu`    | MCU-defined     | MCU interface, FIFO write, tx_busy/tx_done sync |
 | `clk_b_chip` | 11 MHz          | **Root clock for all of Path A** (MAC + PHY)    |
 | `clk_custom` | up to 100 MHz   | Path B                                         |
-| `clk_b_data` | 1 MHz           | Pin kept for pad-ring compatibility; **not used internally** |
+
+The legacy 1 MHz `clk_b_data` input has been retired; the 1 Mbps bit cadence
+is now generated internally by counting chip-within-symbol on `clk_b_chip`.
 
 `rst_n` is asynchronous-assert at the chip boundary; each clock domain
 gets its own `reset_sync` wrapper so the de-assertion is synchronous.
@@ -240,8 +242,8 @@ tx_enable while busy, and failure to latch `invalid_mode`.
 6. **Handshake SDC**: `bit_to_chip_handshake` switched from two independent
    2FFs to a single-FF capture under the divide-by-11 phase-alignment
    contract, eliminating the bit-vs-valid skew window.
-7. **SVA assertions**: mod_config stable, clk_b_data div-by-11,
-   tx_enable / payload_len constraints, invalid_mode latch.
+7. **SVA assertions**: mod_config stable, tx_enable / payload_len
+   constraints, invalid_mode latch.
 
 ### Round 2 (this round — multi-rate 802.11b)
 
@@ -267,14 +269,13 @@ tx_enable while busy, and failure to latch `invalid_mode`.
    directly (avoids an on-chip divide-by-11 for 5.5/11 Mbps).
 9. **Removed files**: `path_a/bit_to_chip_handshake.v`,
    `path_a/phy_dsss_80211b.v` (replaced by rotator + merged MAC).
-10. **`clk_b_data` kept as top-level pin but unused internally**.  Can be
-    removed from the pad ring on a future tape-out spin; left in for this
-    round per review preference.
+10. **`clk_b_data` pin retired**.  The MAC derives its 1 Mbps cadence from
+    `chip_cnt` on `clk_b_chip`, so the pad is no longer needed; removed
+    from the top-level port list and pad ring.
 
 ## 8. Outstanding items for tape-out
 
 - Swap `clock_mux_static` for the PDK's glitch-free clock-mux cell.
-- Decide whether to retire the `clk_b_data` pin on the pad ring.
 - Confirm MCU firmware support for the new CCK packing format and the
   post-header scrambler-state replication.
 - Decide whether Short PLCP is ever needed (currently not supported).

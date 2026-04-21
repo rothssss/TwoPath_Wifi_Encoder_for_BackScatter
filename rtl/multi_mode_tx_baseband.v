@@ -23,9 +23,9 @@
 //       Chip output: symbol_out[7:0] at clk_custom rate.
 //
 // Integration notes (see design-docs/Multi-Mode_TX_Architecture.md):
-//   * Path A MAC now runs entirely on clk_b_chip (11 MHz).  clk_b_data is
-//     still a top-level input pin for pad-ring compatibility but is not
-//     used internally -- hook it up externally or tie off.
+//   * Path A MAC runs entirely on clk_b_chip (11 MHz).  The legacy 1 MHz
+//     clk_b_data pin has been retired -- the 1 Mbps bit rate is derived
+//     internally by a chip-within-symbol counter.
 //   * For CCK rates the MCU pre-applies scrambler + FCS + CCK codeword
 //     computation and streams 16-bit CCK symbol words (little-endian two
 //     FIFO bytes each) of the form { c6, c5, c4, c3, c2, c1, c0,
@@ -53,7 +53,6 @@ module multi_mode_tx_baseband #(
     parameter integer FIFO_ADDR_W         = 5
 ) (
     // Clocks & reset
-    input  wire        clk_b_data,   // (unused internally; see note above)
     input  wire        clk_b_chip,   // 11 MHz, root clock for Path A
     input  wire        clk_custom,   // up to 100 MHz
     input  wire        clk_mcu,
@@ -304,7 +303,7 @@ module multi_mode_tx_baseband #(
     assign underrun = a_ur_mcu | b_ur_mcu;
 
     // Diagnostic-only signal kept live.
-    wire _unused = &{1'b0, b_invalid_mode, clk_b_data};
+    wire _unused = &{1'b0, b_invalid_mode};
 
     // =======================================================================
     // SVA (sim-only).  Enable with +define+ASSERT_ON.

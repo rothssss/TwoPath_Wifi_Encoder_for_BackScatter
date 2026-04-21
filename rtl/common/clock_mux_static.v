@@ -5,7 +5,7 @@
 //   `sel` must NOT change while either clk0 or clk1 is toggling.  The
 //   project-level integration guarantees this because `mod_config` is a
 //   static configuration register that is programmed BEFORE either of
-//   clk_b_data/clk_custom is un-gated.
+//   clk_b_chip/clk_custom is un-gated.
 //
 // For production silicon, REPLACE this wrapper with the standard-cell
 // library's glitch-free clock mux (e.g. CKMUX2D* in most foundry kits)
