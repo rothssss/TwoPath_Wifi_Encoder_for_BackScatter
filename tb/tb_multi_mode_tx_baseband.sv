@@ -31,9 +31,9 @@
 //
 // The TB is not a bit-accurate 802.11 conformance checker: it verifies
 // framing, control flow, CDC plumbing, error handling, and per-mode
-// chip/symbol counts.  Focused Path A bit-level regressions live in
-// `tb_mac_fsm_80211b_checks.sv`; anything beyond that belongs in a
-// per-module UVM environment.
+// chip/symbol counts.  Focused Path A / Path B bit-level regressions live in
+// `tb_mac_fsm_80211b_checks.sv` and `tb_mac_fsm_custom_checks.sv`;
+// anything beyond that belongs in a per-module UVM environment.
 //
 // Run (Cadence Xcelium):
 //   xrun -sv -f tb/filelist.f \
@@ -326,7 +326,7 @@ module tb_multi_mode_tx_baseband;
         integer total_bits;
         begin
             total_bits    = CUSTOM_PREAMBLE_LEN + 8*n + 32;
-            syms_path_b   = total_bits / bits_per_sym;
+            syms_path_b   = (total_bits + bits_per_sym - 1) / bits_per_sym;
         end
     endfunction
 
@@ -464,6 +464,7 @@ module tb_multi_mode_tx_baseband;
         run_path_b_test("T_B3 16-QAM",  4'b1010, 4, 4);
         run_path_b_test("T_B4 64-QAM",  4'b1011, 4, 6);
         run_path_b_test("T_B5 256-QAM", 4'b1100, 4, 8);
+        run_path_b_test("T_B6 64-QAM partial flush", 4'b1011, 2, 6);
 
         // ---------------------------------------------------------------
         // T_C2 : Back-to-back DBPSK packets — regression for state

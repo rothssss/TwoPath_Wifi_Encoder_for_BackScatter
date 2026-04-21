@@ -190,15 +190,14 @@ module mac_fsm_custom #(
                     preamble_sr  <= {1'b0, preamble_sr[31:1]};
                     preamble_cnt <= preamble_cnt + 1'b1;
 
-                    // Prefetch first payload byte on the second-to-last cycle.
-                    if ((preamble_cnt == CUSTOM_PREAMBLE_LEN - 2) &&
-                        (payload_len_q != 16'd0)) begin
-                        if (!fifo_empty) fifo_rd_en    <= 1'b1;
-                        else             underrun_flag <= 1'b1;
-                    end
                     if ((preamble_cnt == CUSTOM_PREAMBLE_LEN - 1) &&
                         (payload_len_q != 16'd0)) begin
-                        byte_sr <= fifo_rd_data;
+                        if (!fifo_empty) begin
+                            byte_sr <= fifo_rd_data;
+                            if (payload_len_q > 16'd1) fifo_rd_en <= 1'b1;
+                        end else begin
+                            underrun_flag <= 1'b1;
+                        end
                     end
                 end
 
@@ -206,15 +205,16 @@ module mac_fsm_custom #(
                     byte_sr     <= {1'b0, byte_sr[7:1]};
                     bit_in_byte <= bit_in_byte + 1'b1;
 
-                    if ((bit_in_byte == 3'd6) &&
-                        (byte_cnt != payload_len_q - 1)) begin
-                        if (!fifo_empty) fifo_rd_en    <= 1'b1;
-                        else             underrun_flag <= 1'b1;
-                    end
                     if (bit_in_byte == 3'd7) begin
                         byte_cnt <= byte_cnt + 1'b1;
                         if (byte_cnt != payload_len_q - 1) begin
-                            byte_sr <= fifo_rd_data;
+                            if (!fifo_empty) begin
+                                byte_sr <= fifo_rd_data;
+                                if (byte_cnt != payload_len_q - 16'd2)
+                                    fifo_rd_en <= 1'b1;
+                            end else begin
+                                underrun_flag <= 1'b1;
+                            end
                         end
                     end
                 end
