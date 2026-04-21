@@ -1,0 +1,12 @@
+#e1(21Apr2026:00:00:22): source ./xcelium.d/env.d/env.history.21Apr2026_00_00_22
+s1(21Apr2026:00:00:22):  xrun -sv -f tb/filelist.f +define+ASSERT_ON -top tb_multi_mode_tx_baseband 
+#e2(21Apr2026:00:09:23): source ./xcelium.d/env.d/env.history.21Apr2026_00_09_23
+s2(21Apr2026:00:09:23):  xrun -sv -f tb/filelist.f +define+ASSERT_ON -top tb_multi_mode_tx_baseband 
+#e3(21Apr2026:00:11:02): source ./xcelium.d/env.d/env.history.21Apr2026_00_11_02
+s3(21Apr2026:00:11:02):  xrun -sv -f tb/filelist.f +define+ASSERT_ON -top tb_multi_mode_tx_baseband 
+#e4(21Apr2026:00:14:15): source ./xcelium.d/env.d/env.history.21Apr2026_00_14_15
+s4(21Apr2026:00:14:15):  xrun -sv -f tb/filelist.f +define+ASSERT_ON -top tb_multi_mode_tx_baseband 
+#e5(21Apr2026:00:32:22): source ./xcelium.d/env.d/env.history.21Apr2026_00_32_22
+s5(21Apr2026:00:32:22):  xrun -sv -f tb/filelist.f -top tb_multi_mode_tx_baseband -access +rwc -dumpsaif tb_mmtx.saif ... 
+#e6(21Apr2026:00:36:45): source ./xcelium.d/env.d/env.history.21Apr2026_00_36_45
+s6(21Apr2026:00:36:45):  xrun -sv -access +rwc -f tb/filelist.f -top tb_multi_mode_tx_baseband -input tb/saif.tcl 

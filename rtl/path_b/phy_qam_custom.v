@@ -5,12 +5,16 @@
 //
 //   mod_config  |  N (bits/symbol)  |  Output placement
 //   ------------+-------------------+-------------------
-//   001 (OOK)   |  1                |  path_b_symbol[0]
-//   010 (QPSK)  |  2                |  path_b_symbol[1:0]
-//   011 (16QAM) |  4                |  path_b_symbol[3:0]
-//   100 (64QAM) |  6                |  path_b_symbol[5:0]
-//   101 (256QAM)|  8                |  path_b_symbol[7:0]
+//   000 (OOK)   |  1                |  path_b_symbol[0]
+//   001 (QPSK)  |  2                |  path_b_symbol[1:0]
+//   010 (16QAM) |  4                |  path_b_symbol[3:0]
+//   011 (64QAM) |  6                |  path_b_symbol[5:0]
+//   100 (256QAM)|  8                |  path_b_symbol[7:0]
 //   other       |  (undefined)      |  all zero (idle)
+//
+// The encoding matches mod_config[2:0] as passed by the top level (see
+// Multi-Mode_TX_Architecture.md §1).  mod_config[3]=1 selects Path B at
+// the top; that bit is stripped before reaching this module.
 //
 // Accumulation convention: the first bit received lands in the symbol LSB;
 // the Nth bit lands in bit N-1.  Upper bits above N-1 are hard-wired to 0
@@ -46,12 +50,12 @@ module phy_qam_custom (
     reg [3:0] bits_per_sym;
     always @(*) begin
         case (mod_config)
-            3'b001 : bits_per_sym = 4'd1;  // OOK
-            3'b010 : bits_per_sym = 4'd2;  // QPSK
-            3'b011 : bits_per_sym = 4'd4;  // 16-QAM
-            3'b100 : bits_per_sym = 4'd6;  // 64-QAM
-            3'b101 : bits_per_sym = 4'd8;  // 256-QAM
-            default: bits_per_sym = 4'd0;  // invalid / Path A
+            3'b000 : bits_per_sym = 4'd1;  // OOK
+            3'b001 : bits_per_sym = 4'd2;  // QPSK
+            3'b010 : bits_per_sym = 4'd4;  // 16-QAM
+            3'b011 : bits_per_sym = 4'd6;  // 64-QAM
+            3'b100 : bits_per_sym = 4'd8;  // 256-QAM
+            default: bits_per_sym = 4'd0;  // invalid
         endcase
     end
 

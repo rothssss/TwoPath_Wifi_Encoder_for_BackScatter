@@ -1,0 +1,240 @@
+xrun: 25.03-s003: (c) Copyright 1995-2025 Cadence Design Systems, Inc.
+TOOL:	xrun	25.03-s003: Started on Apr 21, 2026 at 00:36:45 CDT
+xrun
+	-sv
+	-access +rwc
+	-f tb/filelist.f
+		tb/timescale.v
+		rtl/cdc/sync_2ff.v
+		rtl/cdc/pulse_sync.v
+		rtl/cdc/reset_sync.v
+		rtl/cdc/async_fifo.v
+		rtl/common/clock_mux_static.v
+		rtl/common/scrambler_x7x4.v
+		rtl/common/crc32_80211.v
+		rtl/common/crc16_80211_hec.v
+		rtl/common/phase_to_iq.v
+		rtl/path_a/phy_a_rotator.v
+		rtl/path_a/mac_fsm_80211b.v
+		rtl/path_b/mac_fsm_custom.v
+		rtl/path_b/phy_qam_custom.v
+		rtl/multi_mode_tx_baseband.v
+		tb/tb_multi_mode_tx_baseband.sv
+	-top tb_multi_mode_tx_baseband
+	-input tb/saif.tcl
+file: rtl/multi_mode_tx_baseband.v
+	module worklib.multi_mode_tx_baseband:v
+		errors: 0, warnings: 0
+	Elaborating the design hierarchy:
+		Caching library 'worklib' ....... Done
+	Top level design units:
+		tb_multi_mode_tx_baseband
+	Building instance overlay tables: .................... Done
+	Generating native compiled code:
+		worklib.pulse_sync:v <0x2164af55>
+			streams:   6, words:  1091
+		worklib.sync_2ff:v <0x571c82f1>
+			streams:   3, words:   792
+		worklib.phy_qam_custom:v <0x30b0ff26>
+			streams:   8, words:  3019
+		worklib.mac_fsm_custom:v <0x1c8b9bed>
+			streams:  30, words: 14790
+		worklib.phase_to_iq:v <0x7f491681>
+			streams:   1, words:   255
+		worklib.phy_a_rotator:v <0x7f27bdc1>
+			streams:   8, words:  2089
+		worklib.crc32_80211:v <0x2d30109e>
+			streams:   5, words:  1119
+		worklib.crc16_80211_hec:v <0x0decfafa>
+			streams:   5, words:  1169
+		worklib.mac_fsm_80211b:v <0x747db628>
+			streams:  61, words: 32897
+		worklib.sync_2ff:v <0x2aa1e778>
+			streams:   3, words:   769
+		worklib.sync_2ff:v <0x6db21183>
+			streams:   3, words:   769
+		worklib.async_fifo:v <0x2b3b3338>
+			streams:  17, words:  4226
+		worklib.clock_mux_static:v <0x23e95398>
+			streams:   0, words:     0
+		worklib.sync_2ff:v <0x100f740a>
+			streams:   3, words:   792
+		worklib.pulse_sync:v <0x2151a1c1>
+			streams:   6, words:  1091
+		worklib.reset_sync:v <0x7ae6b44c>
+			streams:   3, words:   693
+		worklib.reset_sync:v <0x59d73cc5>
+			streams:   3, words:   693
+		worklib.multi_mode_tx_baseband:v <0x3ae5048c>
+			streams:  11, words:  1932
+		worklib.tb_multi_mode_tx_baseband:sv <0x2aaa9f5f>
+			streams:  58, words: 53056
+	Building instance specific data structures.
+	Loading native compiled code:     .................... Done
+	Design hierarchy summary:
+		                 Instances  Unique
+		Modules:                28      14
+		Registers:             184     157
+		Scalar wires:           88       -
+		Vectored wires:         41       -
+		Always blocks:          46      29
+		Initial blocks:         20      20
+		Cont. assignments:      53      66
+		Pseudo assignments:     26       -
+		Process Clocks:         33       8
+		Simulation timescale:  1ps
+	Writing initial simulation snapshot: worklib.tb_multi_mode_tx_baseband:sv
+Loading snapshot worklib.tb_multi_mode_tx_baseband:sv .................... Done
+xcelium> source /clear/apps/cadence-2025/rhel8/XCELIUM2503/tools/xcelium/files/xmsimrc
+xcelium> # =============================================================================
+xcelium> # saif.tcl : dump an SAIF activity file for every signal inside the DUT
+xcelium> # across the whole TB run.  Feed the resulting activity.saif into Joules
+xcelium> # (Cadence) or PrimePower (Synopsys) for dynamic-power estimation.
+xcelium> #
+xcelium> # Usage:
+xcelium> #   xrun -sv -access +rwc -f tb/filelist.f \
+> #        -top tb_multi_mode_tx_baseband \
+> #        -input tb/saif.tcl
+xcelium> # =============================================================================
+xcelium> 
+xcelium> # Open an SAIF database that will capture every toggle while the sim runs.
+xcelium> database -open -saif saifdb -into activity.saif -default
+xmsim: *E,UNKOPT: unrecognized option for the database [-open] command (-saif).
+xcelium> 
+xcelium> # Probe everything under the DUT instance recursively.  `-depth all` walks
+xcelium> # hierarchy; `-all` includes every net/reg/port at each level.
+xcelium> probe -create -saif -database saifdb tb_multi_mode_tx_baseband.dut \
+>       -all -depth all
+xmsim: *E,UNKOPT: unrecognized option for the probe [-create] command (-saif).
+xcelium> 
+xcelium> # Run the whole testbench.  The initial block in the TB ends with $finish,
+xcelium> # which closes the database automatically, but we call it explicitly for
+xcelium> # clarity.
+xcelium> run
+============================================================
+ tb_multi_mode_tx_baseband : functional TX-baseband tests  
+============================================================
+
+--- T_C1 invalid mod_config ---
+    [PASS] invalid_mode latched high
+    [PASS] tx_busy stayed low
+    [PASS] no tx_done pulse                                        got=0
+    [PASS] no chip_valid pulses                                    got=0
+    [PASS] no symbol_valid pulses                                  got=0
+    [PASS] no underrun                                             got=0
+    [PASS] invalid_mode still latched
+    [PASS] tx_busy stayed low
+
+--- T_A1 1 Mbps DBPSK : mod_config=0000 payload_len=4 ---
+    [PASS] fifo bytes fit in 32-deep FIFO
+    [PASS] tx_done pulsed once
+    [PASS] tx_done pulse count                                     got=1
+    [PASS] chip_valid pulses                                       got=2816
+    [PASS] symbol_valid pulses (Path B silent)                     got=0
+    [PASS] no underrun                                             got=0
+    [PASS] invalid_mode clear
+    [PASS] tx_busy returned low
+
+--- T_A2 2 Mbps DQPSK : mod_config=0001 payload_len=4 ---
+    [PASS] fifo bytes fit in 32-deep FIFO
+    [PASS] tx_done pulsed once
+    [PASS] tx_done pulse count                                     got=1
+    [PASS] chip_valid pulses                                       got=2464
+    [PASS] symbol_valid pulses (Path B silent)                     got=0
+    [PASS] no underrun                                             got=0
+    [PASS] invalid_mode clear
+    [PASS] tx_busy returned low
+
+--- T_A3 5.5 Mbps CCK : mod_config=0010 payload_len=3 ---
+    [PASS] fifo bytes fit in 32-deep FIFO
+    [PASS] tx_done pulsed once
+    [PASS] tx_done pulse count                                     got=1
+    [PASS] chip_valid pulses                                       got=2224
+    [PASS] symbol_valid pulses (Path B silent)                     got=0
+    [PASS] no underrun                                             got=0
+    [PASS] invalid_mode clear
+    [PASS] tx_busy returned low
+
+--- T_A4 11  Mbps CCK : mod_config=0011 payload_len=3 ---
+    [PASS] fifo bytes fit in 32-deep FIFO
+    [PASS] tx_done pulsed once
+    [PASS] tx_done pulse count                                     got=1
+    [PASS] chip_valid pulses                                       got=2168
+    [PASS] symbol_valid pulses (Path B silent)                     got=0
+    [PASS] no underrun                                             got=0
+    [PASS] invalid_mode clear
+    [PASS] tx_busy returned low
+
+--- T_B1 OOK : mod_config=1000 payload_len=4 ---
+    [PASS] payload_len fits in FIFO
+    [PASS] tx_done pulsed once
+    [PASS] tx_done pulse count                                     got=1
+    [PASS] symbol_valid pulses                                     got=96
+    [PASS] chip_valid pulses (Path A silent)                       got=0
+    [PASS] no underrun                                             got=0
+    [PASS] invalid_mode clear
+    [PASS] tx_busy returned low
+
+--- T_B2 QPSK : mod_config=1001 payload_len=4 ---
+    [PASS] payload_len fits in FIFO
+    [PASS] tx_done pulsed once
+    [PASS] tx_done pulse count                                     got=1
+    [PASS] symbol_valid pulses                                     got=48
+    [PASS] chip_valid pulses (Path A silent)                       got=0
+    [PASS] no underrun                                             got=0
+    [PASS] invalid_mode clear
+    [PASS] tx_busy returned low
+
+--- T_B3 16-QAM : mod_config=1010 payload_len=4 ---
+    [PASS] payload_len fits in FIFO
+    [PASS] tx_done pulsed once
+    [PASS] tx_done pulse count                                     got=1
+    [PASS] symbol_valid pulses                                     got=24
+    [PASS] chip_valid pulses (Path A silent)                       got=0
+    [PASS] no underrun                                             got=0
+    [PASS] invalid_mode clear
+    [PASS] tx_busy returned low
+
+--- T_B4 64-QAM : mod_config=1011 payload_len=4 ---
+    [PASS] payload_len fits in FIFO
+    [PASS] tx_done pulsed once
+    [PASS] tx_done pulse count                                     got=1
+    [PASS] symbol_valid pulses                                     got=16
+    [PASS] chip_valid pulses (Path A silent)                       got=0
+    [PASS] no underrun                                             got=0
+    [PASS] invalid_mode clear
+    [PASS] tx_busy returned low
+
+--- T_B5 256-QAM : mod_config=1100 payload_len=4 ---
+    [PASS] payload_len fits in FIFO
+    [PASS] tx_done pulsed once
+    [PASS] tx_done pulse count                                     got=1
+    [PASS] symbol_valid pulses                                     got=12
+    [PASS] chip_valid pulses (Path A silent)                       got=0
+    [PASS] no underrun                                             got=0
+    [PASS] invalid_mode clear
+    [PASS] tx_busy returned low
+
+--- T_C2 back-to-back DBPSK ---
+    [PASS] packet 1 tx_done seen
+    [PASS] packet 1 chip count                                     got=2816
+    [PASS] packet 2 tx_done seen
+    [PASS] packet 2 chip count                                     got=2816
+    [PASS] no underrun across pair                                 got=0
+    [PASS] total tx_done pulses == 2                               got=2
+
+============================================================
+ FUNCTIONAL TEST REPORT
+============================================================
+  tests run    : 86
+  tests passed : 86
+  tests failed : 0
+  RESULT       : *** ALL TESTS PASSED ***
+============================================================
+
+Simulation complete via $finish(1) at time 1417633600 PS + 0
+./tb/tb_multi_mode_tx_baseband.sv:522         $finish;
+xcelium> database -close saifdb
+xmsim: *E,DBNFND: saifdb does not match any database name.
+xcelium> exit
+TOOL:	xrun	25.03-s003: Exiting on Apr 21, 2026 at 00:36:48 CDT  (total: 00:00:03)

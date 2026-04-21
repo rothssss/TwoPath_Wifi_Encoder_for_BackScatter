@@ -1,0 +1,80 @@
+# Functional testbench
+
+`tb_multi_mode_tx_baseband.sv` exercises every datapath of the top-level
+`multi_mode_tx_baseband` module and prints a pass/fail report at the end.
+
+## Running (Xcelium)
+
+From the repository root:
+
+```
+xrun -sv -f tb/filelist.f +define+ASSERT_ON -top tb_multi_mode_tx_baseband
+```
+
+Append `+define+WAVES` to produce `tb_multi_mode_tx_baseband.vcd`.
+
+The TB does **not** invoke a licensed simulator on its own; the user is
+expected to drive `xrun`.
+
+## Test matrix
+
+| Test | Mode                     | `mod_config` | `payload_len` | Expected count             |
+|------|--------------------------|--------------|---------------|----------------------------|
+| T_C1 | Illegal mod_config       | `0111`, `1101` | –           | `invalid_mode` latches; no tx |
+| T_A1 | 1 Mbps DBPSK             | `0000`       | 4 bytes       | 2816 `chip_valid`          |
+| T_A2 | 2 Mbps DQPSK             | `0001`       | 4 bytes       | 2464 `chip_valid`          |
+| T_A3 | 5.5 Mbps CCK             | `0010`       | 3 bytes       | 2224 `chip_valid`          |
+| T_A4 | 11  Mbps CCK             | `0011`       | 3 bytes       | 2168 `chip_valid`          |
+| T_B1 | OOK (custom)             | `1000`       | 4 bytes       | 96  `symbol_valid`         |
+| T_B2 | QPSK (custom)            | `1001`       | 4 bytes       | 48  `symbol_valid`         |
+| T_B3 | 16-QAM (custom)          | `1010`       | 4 bytes       | 24  `symbol_valid`         |
+| T_B4 | 64-QAM (custom)          | `1011`       | 4 bytes       | 16  `symbol_valid`         |
+| T_B5 | 256-QAM (custom)         | `1100`       | 4 bytes       | 12  `symbol_valid`         |
+| T_C2 | Back-to-back DBPSK       | `0000`       | 4 bytes x2    | 2×2816 chips, 2 `tx_done`  |
+
+### Path A chip formula
+
+Preamble + header is always 1 Mbps DBPSK/Barker:
+
+```
+HDR_SYMS  = 128(SYNC) + 16(SFD) + 32(HEAD) + 16(HEC) = 192
+HDR_CHIPS = HDR_SYMS * 11                            = 2112
+```
+
+PSDU + FCS chips depend on rate (`N = payload_len`):
+
+| Rate          | PSDU+FCS symbols            | chips/sym | PSDU chips        |
+|---------------|-----------------------------|-----------|-------------------|
+| 1 Mbps DBPSK  | `8N + 32`                   | 11        | `11*(8N+32)`      |
+| 2 Mbps DQPSK  | `(8N + 32) / 2`             | 11        | `11*(4N+16)`      |
+| 5.5 Mbps CCK  | `2N + 8`                    | 8         | `8*(2N+8)`        |
+| 11  Mbps CCK  | `N + 4`                     | 8         | `8*(N+4)`         |
+
+### Path B symbol formula
+
+```
+total_bits = CUSTOM_PREAMBLE_LEN(32) + 8*N + 32(FCS)
+symbols    = total_bits / bits_per_sym
+```
+
+## Known pre-existing RTL issues the TB will surface
+
+1. **`clock_mux_static` is a combinational MUX placeholder.**
+   Simulation will produce the correct result, but the TB cannot model
+   the glitch risk that is the reason to replace it with a foundry
+   glitch-free clock-mux cell before GDS.
+
+2. **Path B partial-symbol drop at EoP.**
+   If `total_bits % bits_per_sym != 0`, the trailing bits are silently
+   dropped.  All Path B tests use `payload_len = 4` which happens to be
+   divisible for every supported mode, so this test does not exercise
+   the partial case; targeted tests should be added separately if the
+   behaviour is tightened.
+
+## Extending
+
+- Add per-module random-payload tests under [tests/module/](./tests/module/)
+  (not yet created) for CRC-32, CRC-16 HEC, scrambler, async FIFO.
+- A conformance checker that replays `chip_i`/`chip_q` through a
+  reference 802.11b demodulator would catch bit-level encoding bugs
+  that this counts-based TB cannot.

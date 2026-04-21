@@ -1,0 +1,36 @@
+//
+// File created by:  xrun
+// Do not modify this file
+//
+-XLMODE
+./xcelium.d/run.lnx86.25.03.d
+-RUNMODE
+-sv
+tb/timescale.v
+rtl/cdc/sync_2ff.v
+rtl/cdc/pulse_sync.v
+rtl/cdc/reset_sync.v
+rtl/cdc/async_fifo.v
+rtl/common/clock_mux_static.v
+rtl/common/scrambler_x7x4.v
+rtl/common/crc32_80211.v
+rtl/common/crc16_80211_hec.v
+rtl/common/phase_to_iq.v
+rtl/path_a/phy_a_rotator.v
+rtl/path_a/mac_fsm_80211b.v
+rtl/path_b/mac_fsm_custom.v
+rtl/path_b/phy_qam_custom.v
+rtl/multi_mode_tx_baseband.v
+tb/tb_multi_mode_tx_baseband.sv
+-CDSLIB
+./xcelium.d/run.lnx86.25.03.d/cdsrun.lib
+-HDLVAR
+./xcelium.d/run.lnx86.25.03.d/hdlrun.var
+-no_analogsolver
+-MESSAGES
+-UPDATE
+-XLLIBSTORE
+./xcelium.d/run.lnx86.25.03.d/xllibs
+-ALLOWUNBOUND
+-sv_ms
+-hastop

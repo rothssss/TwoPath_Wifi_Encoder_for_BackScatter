@@ -59,6 +59,15 @@ module async_fifo #(
         if (wr_en && !full) mem[wptr_bin[ADDR_W-1:0]] <= wr_data;
     end
 
+    // ---- Read domain -----------------------------------------------------
+    // Declare the read-domain pointer regs up front so the r2w synchronizer
+    // below can reference `rptr_gray` without creating an implicit wire
+    // (strict LRM; Xcelium rejects the later reg redeclaration).
+    reg  [ADDR_W:0] rptr_bin;
+    reg  [ADDR_W:0] rptr_gray;
+    wire [ADDR_W:0] rptr_bin_next  = rptr_bin + {{ADDR_W{1'b0}}, (rd_en & ~empty)};
+    wire [ADDR_W:0] rptr_gray_next = (rptr_bin_next >> 1) ^ rptr_bin_next;
+
     // Sync read-pointer (gray) into write domain
     wire [ADDR_W:0] rptr_gray_at_w;
     sync_2ff #(.WIDTH(ADDR_W+1), .RESET_VAL(1'b0)) u_sync_r2w (
@@ -71,12 +80,6 @@ module async_fifo #(
     // inverted (classic Cummings async-FIFO formulation).
     assign full = (wptr_gray == {~rptr_gray_at_w[ADDR_W:ADDR_W-1],
                                   rptr_gray_at_w[ADDR_W-2:0]});
-
-    // ---- Read domain -----------------------------------------------------
-    reg  [ADDR_W:0] rptr_bin;
-    reg  [ADDR_W:0] rptr_gray;
-    wire [ADDR_W:0] rptr_bin_next  = rptr_bin + {{ADDR_W{1'b0}}, (rd_en & ~empty)};
-    wire [ADDR_W:0] rptr_gray_next = (rptr_bin_next >> 1) ^ rptr_bin_next;
 
     always @(posedge rclk or negedge rrst_n) begin
         if (!rrst_n) begin

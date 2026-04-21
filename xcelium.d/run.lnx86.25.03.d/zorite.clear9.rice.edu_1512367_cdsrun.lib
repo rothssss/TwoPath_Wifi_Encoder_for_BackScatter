@@ -1,0 +1,3 @@
+SOFTINCLUDE /clear/apps/cadence-2025/rhel8/XCELIUM2503/tools/inca/files/cds.lib
+include ../../../../../cds.lib
+define worklib ../worklib
