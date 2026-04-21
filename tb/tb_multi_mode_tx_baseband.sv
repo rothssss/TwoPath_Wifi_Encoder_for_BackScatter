@@ -31,8 +31,9 @@
 //
 // The TB is not a bit-accurate 802.11 conformance checker: it verifies
 // framing, control flow, CDC plumbing, error handling, and per-mode
-// chip/symbol counts.  Anything more detailed (Barker polarity, CRC
-// values, scrambler state) belongs in a per-module UVM environment.
+// chip/symbol counts.  Focused Path A bit-level regressions live in
+// `tb_mac_fsm_80211b_checks.sv`; anything beyond that belongs in a
+// per-module UVM environment.
 //
 // Run (Cadence Xcelium):
 //   xrun -sv -f tb/filelist.f \
@@ -457,12 +458,6 @@ module tb_multi_mode_tx_baseband;
         // ---------------------------------------------------------------
         // Path B datapaths.  Bits-per-symbol values match the NEW
         // architecture doc (OOK=1, QPSK=2, 16QAM=4, 64QAM=6, 256QAM=8).
-        //
-        // NOTE: phy_qam_custom.v still uses the pre-Round-2 encoding
-        // (mod_config[2:0]=001 for OOK, 101 for 256-QAM).  The tests
-        // below drive the values from the new spec, so any mismatch
-        // between RTL and spec will surface as FAIL here (zero symbols
-        // and/or invalid_mode asserts internally).
         // ---------------------------------------------------------------
         run_path_b_test("T_B1 OOK",     4'b1000, 4, 1);
         run_path_b_test("T_B2 QPSK",    4'b1001, 4, 2);

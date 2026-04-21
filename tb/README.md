@@ -1,7 +1,12 @@
-# Functional testbench
+# Testbenches
 
 `tb_multi_mode_tx_baseband.sv` exercises every datapath of the top-level
 `multi_mode_tx_baseband` module and prints a pass/fail report at the end.
+
+`tb_mac_fsm_80211b_checks.sv` is a focused Path A regression bench for:
+- Barker payload-byte alignment against the FWFT FIFO contract
+- 2 Mbps DQPSK phase-step mapping
+- CCK low/high byte assembly into `cck_word`
 
 ## Running (Xcelium)
 
@@ -13,7 +18,13 @@ xrun -sv -f tb/filelist.f +define+ASSERT_ON -top tb_multi_mode_tx_baseband
 
 Append `+define+WAVES` to produce `tb_multi_mode_tx_baseband.vcd`.
 
-The TB does **not** invoke a licensed simulator on its own; the user is
+For the focused Path A checks:
+
+```
+xrun -sv -f tb/filelist_mac_fsm_80211b_checks.f -top tb_mac_fsm_80211b_checks
+```
+
+The testbenches do **not** invoke a licensed simulator on their own; the user is
 expected to drive `xrun`.
 
 ## Test matrix
