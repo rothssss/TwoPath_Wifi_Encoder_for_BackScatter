@@ -27,13 +27,15 @@
 //   LSB of the first symbol.  Without this reset, if a prior packet ended
 //   mid-symbol (PREAMBLE_LEN + PSDU_BITS + 32 not a multiple of N), the
 //   next packet's first symbol would mix leftover bits from the previous
-//   packet with new preamble bits.
+//   packet with new preamble bits.  `end_pulse` flushes any residual bits as
+//   one final zero-padded symbol so the trailing payload/FCS bits are not lost.
 // =============================================================================
 module phy_qam_custom (
     input  wire       clk,
     input  wire       rst_n,
 
     input  wire       start_pulse,     // sync reset of the S2P accumulator
+    input  wire       end_pulse,       // flush a final partial symbol
     input  wire [2:0] mod_config,
 
     input  wire       bit_valid,
@@ -70,6 +72,24 @@ module phy_qam_custom (
     // which matches the "first bit at symbol LSB" convention.
     wire [7:0] sr_next = {bit_in, sr[7:1]};
 
+    function [7:0] pack_symbol;
+        input [3:0] used_bits;
+        input [7:0] shift_reg;
+        begin
+            case (used_bits)
+                4'd1: pack_symbol = {7'd0, shift_reg[7]};
+                4'd2: pack_symbol = {6'd0, shift_reg[7:6]};
+                4'd3: pack_symbol = {5'd0, shift_reg[7:5]};
+                4'd4: pack_symbol = {4'd0, shift_reg[7:4]};
+                4'd5: pack_symbol = {3'd0, shift_reg[7:3]};
+                4'd6: pack_symbol = {2'd0, shift_reg[7:2]};
+                4'd7: pack_symbol = {1'd0, shift_reg[7:1]};
+                4'd8: pack_symbol =        shift_reg[7:0];
+                default: pack_symbol = 8'd0;
+            endcase
+        end
+    endfunction
+
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
             sr                  <= 8'd0;
@@ -88,18 +108,16 @@ module phy_qam_custom (
                 sr  <= sr_next;
                 if (cnt + 1'b1 == bits_per_sym) begin
                     cnt <= 4'd0;
-                    case (bits_per_sym)
-                        4'd1: path_b_symbol <= {7'd0, sr_next[7]};
-                        4'd2: path_b_symbol <= {6'd0, sr_next[7:6]};
-                        4'd4: path_b_symbol <= {4'd0, sr_next[7:4]};
-                        4'd6: path_b_symbol <= {2'd0, sr_next[7:2]};
-                        4'd8: path_b_symbol <=        sr_next[7:0];
-                        default: path_b_symbol <= 8'd0;
-                    endcase
+                    path_b_symbol <= pack_symbol(bits_per_sym, sr_next);
                     path_b_symbol_valid <= 1'b1;
                 end else begin
                     cnt <= cnt + 1'b1;
                 end
+            end else if (end_pulse && cnt != 4'd0) begin
+                path_b_symbol       <= pack_symbol(cnt, sr);
+                path_b_symbol_valid <= 1'b1;
+                sr                  <= 8'd0;
+                cnt                 <= 4'd0;
             end
         end
     end

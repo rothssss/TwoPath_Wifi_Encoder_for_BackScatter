@@ -252,6 +252,7 @@ module multi_mode_tx_baseband #(
         .clk                 (clk_custom),
         .rst_n               (rst_n_custom_s),
         .start_pulse         (start_pulse_b),
+        .end_pulse           (b_done),
         .mod_config          (mod_config[2:0]),
         .bit_valid           (b_bit_valid),
         .bit_in              (b_bit_out),

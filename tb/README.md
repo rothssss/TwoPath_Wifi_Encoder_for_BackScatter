@@ -1,7 +1,15 @@
-# Functional testbench
+# Testbenches
 
 `tb_multi_mode_tx_baseband.sv` exercises every datapath of the top-level
 `multi_mode_tx_baseband` module and prints a pass/fail report at the end.
+
+`tb_mac_fsm_80211b_checks.sv` is a focused Path A regression bench for:
+- Barker payload-byte alignment against the FWFT FIFO contract
+- 2 Mbps DQPSK phase-step mapping
+- CCK low/high byte assembly into `cck_word`
+
+`tb_mac_fsm_custom_checks.sv` is a focused Path B regression bench for:
+- FWFT FIFO byte alignment into the custom payload stream
 
 ## Running (Xcelium)
 
@@ -13,7 +21,19 @@ xrun -sv -f tb/filelist.f +define+ASSERT_ON -top tb_multi_mode_tx_baseband
 
 Append `+define+WAVES` to produce `tb_multi_mode_tx_baseband.vcd`.
 
-The TB does **not** invoke a licensed simulator on its own; the user is
+For the focused Path A checks:
+
+```
+xrun -sv -f tb/filelist_mac_fsm_80211b_checks.f -top tb_mac_fsm_80211b_checks
+```
+
+For the focused Path B checks:
+
+```
+xrun -sv -f tb/filelist_mac_fsm_custom_checks.f -top tb_mac_fsm_custom_checks
+```
+
+The testbenches do **not** invoke a licensed simulator on their own; the user is
 expected to drive `xrun`.
 
 ## Test matrix
@@ -30,6 +50,7 @@ expected to drive `xrun`.
 | T_B3 | 16-QAM (custom)          | `1010`       | 4 bytes       | 24  `symbol_valid`         |
 | T_B4 | 64-QAM (custom)          | `1011`       | 4 bytes       | 16  `symbol_valid`         |
 | T_B5 | 256-QAM (custom)         | `1100`       | 4 bytes       | 12  `symbol_valid`         |
+| T_B6 | 64-QAM partial flush     | `1011`       | 2 bytes       | 14  `symbol_valid`         |
 | T_C2 | Back-to-back DBPSK       | `0000`       | 4 bytes x2    | 2×2816 chips, 2 `tx_done`  |
 
 ### Path A chip formula
@@ -54,7 +75,7 @@ PSDU + FCS chips depend on rate (`N = payload_len`):
 
 ```
 total_bits = CUSTOM_PREAMBLE_LEN(32) + 8*N + 32(FCS)
-symbols    = total_bits / bits_per_sym
+symbols    = ceil(total_bits / bits_per_sym)
 ```
 
 ## Known pre-existing RTL issues the TB will surface
@@ -63,13 +84,6 @@ symbols    = total_bits / bits_per_sym
    Simulation will produce the correct result, but the TB cannot model
    the glitch risk that is the reason to replace it with a foundry
    glitch-free clock-mux cell before GDS.
-
-2. **Path B partial-symbol drop at EoP.**
-   If `total_bits % bits_per_sym != 0`, the trailing bits are silently
-   dropped.  All Path B tests use `payload_len = 4` which happens to be
-   divisible for every supported mode, so this test does not exercise
-   the partial case; targeted tests should be added separately if the
-   behaviour is tightened.
 
 ## Extending
 

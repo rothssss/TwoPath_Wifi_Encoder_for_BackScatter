@@ -106,7 +106,6 @@ module mac_fsm_80211b #(
     reg [2:0]  bit_in_byte;
     reg [15:0] cck_sym_total;  // total CCK symbols for PSDU+FCS
     reg [15:0] cck_sym_cnt;
-    reg        cck_second_byte;// 0 = expecting first FIFO byte of CCK word, 1 = second
 
     // Per-state shift registers
     reg [7:0]  byte_sr;
@@ -215,14 +214,23 @@ module mac_fsm_80211b #(
 
     // delta_phi1 for Barker-based symbols.
     // DBPSK (1 bit):  0 -> +0 (phase delta 0),    1 -> +pi (phase delta 2)
-    // DQPSK (dibit):  Gray-coded QPSK delta (see sec 16.4.3 table):
-    //   s1 s0 = 00 -> 0    (0)
-    //            01 -> 2    (pi)     -- equivalent to Option X with
-    //            10 -> 1    (pi/2)      Gray: swap for 11<->10 etc. per
-    //            11 -> 3    (-pi/2)     standard.
-    // Using the mapping {s1,s0} directly as {phase[1], phase[0]} matches
-    // natural QPSK bit-to-phase under our phase_to_iq encoding.
-    wire [1:0] delta_phi1_barker = two_bit_sym_c ? {s1, s0} : {s0, 1'b0};
+    // DQPSK (dibit): IEEE 802.11b Table 11, with s0 transmitted first:
+    //   s0 s1 = 00 -> 0, 01 -> +pi/2, 11 -> +pi, 10 -> +3pi/2.
+    function [1:0] dqpsk_delta_from_bits;
+        input bit0;
+        input bit1;
+        begin
+            case ({bit1, bit0})
+                2'b00 : dqpsk_delta_from_bits = 2'd0;
+                2'b10 : dqpsk_delta_from_bits = 2'd1;
+                2'b11 : dqpsk_delta_from_bits = 2'd2;
+                2'b01 : dqpsk_delta_from_bits = 2'd3;
+                default: dqpsk_delta_from_bits = 2'd0;
+            endcase
+        end
+    endfunction
+    wire [1:0] delta_phi1_barker =
+        two_bit_sym_c ? dqpsk_delta_from_bits(s0, s1) : {s0, 1'b0};
 
     // Barker base phase for chip_cnt: '1'-chip -> phase 0, '0'-chip -> phase 2.
     wire barker_chip_bit = BARKER_PATTERN[10 - chip_cnt[3:0]];
@@ -348,7 +356,6 @@ module mac_fsm_80211b #(
             length_us_q        <= 16'd0;
             cck_sym_total      <= 16'd0;
             cck_sym_cnt        <= 16'd0;
-            cck_second_byte    <= 1'b0;
             byte_sr            <= 8'd0;
             header_sr          <= 32'd0;
             sfd_sr             <= 16'd0;
@@ -403,7 +410,6 @@ module mac_fsm_80211b #(
                         byte_cnt        <= 16'd0;
                         bit_in_byte     <= 3'd0;
                         cck_sym_cnt     <= 16'd0;
-                        cck_second_byte <= 1'b0;
                         chip_cnt        <= 4'd0;
                         sfd_sr          <= SFD_PATTERN;
                         header_sr       <= header_load;
@@ -441,26 +447,21 @@ module mac_fsm_80211b #(
                         else                 hec_sr <= {hec_sr[14:0], 1'b0};
                         sym_cnt <= (sym_cnt == 8'd15) ? 8'd0 : sym_cnt + 8'd1;
 
-                        // Prefetch first PSDU byte (Barker rates) or first
-                        // CCK FIFO byte at end of HEC.
-                        if (sym_cnt == 8'd14 && payload_len_q != 16'd0 && !rate_q[1]) begin
-                            if (!fifo_empty) fifo_rd_en    <= 1'b1;
-                            else             underrun_flag <= 1'b1;
-                        end
                         if (sym_cnt == 8'd15 && payload_len_q != 16'd0 && !rate_q[1]) begin
-                            byte_sr <= fifo_rd_data;
-                        end
-                        // CCK: prefetch first two bytes at the last two HEC
-                        // symbols so the first CCK symbol starts cleanly.
-                        if (sym_cnt == 8'd14 && rate_q[1]) begin
-                            if (!fifo_empty) fifo_rd_en    <= 1'b1;
-                            else             underrun_flag <= 1'b1;
+                            if (!fifo_empty) begin
+                                byte_sr <= fifo_rd_data;
+                                if (payload_len_q > 16'd1) fifo_rd_en <= 1'b1;
+                            end else begin
+                                underrun_flag <= 1'b1;
+                            end
                         end
                         if (sym_cnt == 8'd15 && rate_q[1]) begin
-                            cck_word[7:0] <= fifo_rd_data;
-                            if (!fifo_empty) fifo_rd_en    <= 1'b1;
-                            else             underrun_flag <= 1'b1;
-                            cck_second_byte <= 1'b1;
+                            if (!fifo_empty) begin
+                                cck_word[7:0] <= fifo_rd_data;
+                                fifo_rd_en    <= 1'b1;   // advance to the first symbol's high byte
+                            end else begin
+                                underrun_flag <= 1'b1;
+                            end
                         end
                     end
                 end
@@ -481,27 +482,33 @@ module mac_fsm_80211b #(
                             // DBPSK: 1 bit per symbol, 8 bits per byte.
                             byte_sr     <= {1'b0, byte_sr[7:1]};
                             bit_in_byte <= bit_in_byte + 3'd1;
-                            if (bit_in_byte == 3'd6 && byte_cnt != payload_len_q - 16'd1) begin
-                                if (!fifo_empty) fifo_rd_en    <= 1'b1;
-                                else             underrun_flag <= 1'b1;
-                            end
                             if (bit_in_byte == 3'd7) begin
                                 byte_cnt <= byte_cnt + 16'd1;
-                                if (byte_cnt != payload_len_q - 16'd1)
-                                    byte_sr <= fifo_rd_data;
+                                if (byte_cnt != payload_len_q - 16'd1) begin
+                                    if (!fifo_empty) begin
+                                        byte_sr <= fifo_rd_data;
+                                        if (byte_cnt != payload_len_q - 16'd2)
+                                            fifo_rd_en <= 1'b1;
+                                    end else begin
+                                        underrun_flag <= 1'b1;
+                                    end
+                                end
                             end
                         end else begin
                             // DQPSK: 2 bits per symbol, 4 dibits per byte.
                             byte_sr     <= {2'b00, byte_sr[7:2]};
                             bit_in_byte <= bit_in_byte + 3'd2;
-                            if (bit_in_byte == 3'd4 && byte_cnt != payload_len_q - 16'd1) begin
-                                if (!fifo_empty) fifo_rd_en    <= 1'b1;
-                                else             underrun_flag <= 1'b1;
-                            end
                             if (bit_in_byte == 3'd6) begin
                                 byte_cnt <= byte_cnt + 16'd1;
-                                if (byte_cnt != payload_len_q - 16'd1)
-                                    byte_sr <= fifo_rd_data;
+                                if (byte_cnt != payload_len_q - 16'd1) begin
+                                    if (!fifo_empty) begin
+                                        byte_sr <= fifo_rd_data;
+                                        if (byte_cnt != payload_len_q - 16'd2)
+                                            fifo_rd_en <= 1'b1;
+                                    end else begin
+                                        underrun_flag <= 1'b1;
+                                    end
+                                end
                             end
                         end
                     end
@@ -524,35 +531,19 @@ module mac_fsm_80211b #(
                 S_PSDU_CCK: begin
                     if (symbol_end) begin
                         cck_sym_cnt <= cck_sym_cnt + 16'd1;
-
-                        // Shift in the pre-fetched second byte to complete
-                        // the CCK word used in the just-finished symbol,
-                        // and (unless this is the last symbol) start
-                        // prefetching the next pair.
                         if (cck_sym_cnt != cck_sym_total - 16'd1) begin
-                            // Need next two bytes: first one is already in the
-                            // FIFO because we prefetched at HEC-end or
-                            // previous CCK symbol; re-arm.
-                            if (!fifo_empty) fifo_rd_en    <= 1'b1;
-                            else             underrun_flag <= 1'b1;
+                            if (!fifo_empty) begin
+                                cck_word[7:0] <= fifo_rd_data;
+                                fifo_rd_en    <= 1'b1;  // advance next symbol low -> high
+                            end else begin
+                                underrun_flag <= 1'b1;
+                            end
                         end
                     end
-                    // Within a CCK symbol, we need to load the upper byte
-                    // before chip_cnt reaches the c3.. region (bits 8 up).
-                    // Simplest: refill cck_word on two consecutive cycles
-                    // right at symbol_start; chip_cnt 0 still uses bits 0..3.
-                    // NOTE: the prefetch scheme above issues fifo_rd_en once
-                    // per symbol; the async FIFO presents the next byte
-                    // combinationally, so we latch it here.
-                    if (chip_cnt == 4'd0 && cck_sym_cnt != 16'd0) begin
-                        cck_word[7:0] <= fifo_rd_data;   // low byte
-                    end
                     if (chip_cnt == 4'd1) begin
-                        cck_word[15:8] <= fifo_rd_data;  // high byte
-                        // Request the NEXT symbol's low byte immediately so
-                        // it's ready by chip_cnt==0 of the following symbol.
+                        cck_word[15:8] <= fifo_rd_data;
                         if (cck_sym_cnt != cck_sym_total - 16'd1) begin
-                            if (!fifo_empty) fifo_rd_en <= 1'b1;
+                            if (!fifo_empty) fifo_rd_en    <= 1'b1;
                             else             underrun_flag <= 1'b1;
                         end
                     end
