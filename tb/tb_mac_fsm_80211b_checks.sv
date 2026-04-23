@@ -3,6 +3,7 @@
 module tb_mac_fsm_80211b_checks;
 
     localparam integer CLK_T = 10;
+    localparam [3:0]   S_HEAD        = 4'd3;
     localparam [3:0]   S_PSDU_BARKER = 4'd5;
     localparam [3:0]   S_PSDU_CCK    = 4'd7;
 
@@ -31,7 +32,7 @@ module tb_mac_fsm_80211b_checks;
     assign fifo_rd_data = fifo_mem[rptr];
 
     mac_fsm_80211b #(
-        .SCRAMBLER_SEED(7'h00)
+        .SCRAMBLER_SEED(7'h5D)
     ) dut (
         .clk          (clk),
         .rst_n        (rst_n),
@@ -123,6 +124,38 @@ module tb_mac_fsm_80211b_checks;
         end
     endtask
 
+    function automatic ref_scramble_bit;
+        input [6:0] state_in;
+        input       raw_bit;
+        begin
+            ref_scramble_bit = raw_bit ^ state_in[6] ^ state_in[3];
+        end
+    endfunction
+
+    function automatic [6:0] ref_scramble_state;
+        input [6:0] state_in;
+        input       raw_bit;
+        reg         scrambled;
+        begin
+            scrambled = ref_scramble_bit(state_in, raw_bit);
+            ref_scramble_state = {scrambled, state_in[6:1]};
+        end
+    endfunction
+
+    function automatic [1:0] ref_dqpsk_delta;
+        input bit0;
+        input bit1;
+        begin
+            case ({bit1, bit0})
+                2'b00 : ref_dqpsk_delta = 2'd0;
+                2'b10 : ref_dqpsk_delta = 2'd1;
+                2'b11 : ref_dqpsk_delta = 2'd2;
+                2'b01 : ref_dqpsk_delta = 2'd3;
+                default: ref_dqpsk_delta = 2'd0;
+            endcase
+        end
+    endfunction
+
     task automatic do_reset;
         integer i;
         begin
@@ -185,30 +218,64 @@ module tb_mac_fsm_80211b_checks;
         end
     endtask
 
-    task automatic test_dqpsk_mapping;
-        integer cycles;
-        reg     saw_first_symbol;
+    task test_dqpsk_mapping;
+        reg [6:0] ref_state_0;
+        reg [6:0] ref_state_1;
+        reg [1:0] exp_delta;
+        reg       s0;
+        reg       s1;
         begin
             $display("\n--- test_dqpsk_mapping ---");
             do_reset();
-            rate        = 2'b01;
-            payload_len = 16'd1;
-            length_us   = 16'd8;
-            fifo_size   = 1;
-            fifo_mem[0] = 8'h02;  // first dibit on the wire is 0,1 (LSB first)
+            ref_state_0 = 7'h5D;
+            s0          = ref_scramble_bit(ref_state_0, 1'b1);
+            ref_state_1 = ref_scramble_state(ref_state_0, 1'b1);
+            s1          = ref_scramble_bit(ref_state_1, 1'b0);
+            exp_delta   = ref_dqpsk_delta(s0, s1);
+
+            force dut.state        = S_PSDU_BARKER;
+            force dut.rate_q       = 2'b01;
+            force dut.payload_len_q = 16'd2;
+            force dut.byte_cnt     = 16'd0;
+            force dut.bit_in_byte  = 3'd0;
+            force dut.byte_sr      = 8'h01;  // first dibit on the wire is 1,0 (LSB first)
+            force dut.chip_cnt     = 4'd0;
+            force dut.lfsr         = ref_state_0;
+            @(posedge clk); #1;
+            expect_eq2("delta_phi1 for legal-seed DQPSK symbol", delta_phi1, exp_delta);
+            expect_true("update_phi1 asserted for forced DQPSK symbol", update_phi1);
+            release dut.state;
+            release dut.rate_q;
+            release dut.payload_len_q;
+            release dut.byte_cnt;
+            release dut.bit_in_byte;
+            release dut.byte_sr;
+            release dut.chip_cnt;
+            release dut.lfsr;
+        end
+    endtask
+
+    task automatic test_service_field_11m_length_extension;
+        integer cycles;
+        reg saw_head;
+        begin
+            $display("\n--- test_service_field_11m_length_extension ---");
+            do_reset();
+            rate        = 2'b11;
+            payload_len = 16'd3;   // total octets on air = 7 with FCS
+            length_us   = 16'd6;   // ceil(7 * 8 / 11) = 6, so ext bit must be 1
             pulse_start();
 
-            saw_first_symbol = 1'b0;
-            for (cycles = 0; cycles < 4000 && !saw_first_symbol; cycles = cycles + 1) begin
-                @(posedge clk); #1;
-                if (dut.state == S_PSDU_BARKER && dut.bit_in_byte == 3'd0 && update_phi1) begin
-                    expect_eq8("first DQPSK payload byte", dut.byte_sr, 8'h02);
-                    expect_eq2("delta_phi1 for dibit 01", delta_phi1, 2'd1);
-                    saw_first_symbol = 1'b1;
+            saw_head = 1'b0;
+            for (cycles = 0; cycles < 4000 && !saw_head; cycles = cycles + 1) begin
+                @(posedge clk);
+                if (dut.state == S_HEAD && dut.sym_cnt == 8'd0 && dut.chip_cnt == 4'd0) begin
+                    expect_eq8("11 Mbps SIGNAL byte", dut.header_sr[7:0], 8'h6E);
+                    expect_eq8("11 Mbps SERVICE byte", dut.header_sr[15:8], 8'h80);
+                    saw_head = 1'b1;
                 end
             end
-            expect_true("observed first DQPSK payload symbol", saw_first_symbol);
-            expect_true("no underrun during DQPSK mapping test", !underrun_flag);
+            expect_true("observed first header symbol", saw_head);
         end
     endtask
 
@@ -262,6 +329,7 @@ module tb_mac_fsm_80211b_checks;
 
         test_barker_fifo_alignment();
         test_dqpsk_mapping();
+        test_service_field_11m_length_extension();
         test_cck_word_assembly();
 
         $display("\n============================================================");

@@ -1,22 +1,17 @@
 // =============================================================================
 // tb_mac_fsm_custom : focused check of the Path B MAC.
 //
-// With SCRAMBLER_SEED = 7'h00, the LFSR stays at 0 forever so scrambling is
-// the identity.  Thus bit_out is equal to raw_bit_c, which makes expected
-// bit streams easy to derive:
-//
 //   - Preamble : CUSTOM_PREAMBLE_PAT LSB-first (32 bits of 0xAAAAAAAA
 //                => alternating 0,1,0,1,...).
-//   - Payload  : each FIFO byte emitted LSB-first.
-//   - FCS      : 32 bits of CRC-32('<payload bytes>') LSB-first, finalized
-//                (i.e. XOR with 0xFFFFFFFF).
+//   - Payload  : each FIFO byte emitted LSB-first and self-synchronously
+//                scrambled with polynomial x^7 + x^4 + 1.
 //
 // Checks:
 //   T1 total bit_valid count = CUSTOM_PREAMBLE_LEN + 8*payload_len + 32
 //                            = 32 + 16 + 32 = 80 for payload_len=2.
 //   T2 done_pulse fires exactly once.
 //   T3 first 32 captured bits match 0xAAAAAAAA LSB-first.
-//   T4 next 16 bits match payload bytes LSB-first = {0x5A, 0xA5}.
+//   T4 next 16 bits match the self-synchronously scrambled payload bits.
 //   T5 no underrun_flag asserts.
 // =============================================================================
 `timescale 1ns/1ps
@@ -37,6 +32,7 @@ module tb_mac_fsm_custom;
     wire [7:0]  fifo_rd_data;
     wire        bit_valid;
     wire        bit_out;
+    localparam [6:0] SCR_SEED = 7'h5D;
 
     reg  [7:0] fifo_mem [0:31];
     integer    fifo_size = 0;
@@ -46,7 +42,7 @@ module tb_mac_fsm_custom;
     assign fifo_rd_data = fifo_mem[rptr];
 
     mac_fsm_custom #(
-        .SCRAMBLER_SEED(7'h00),
+        .SCRAMBLER_SEED(SCR_SEED),
         .CUSTOM_PREAMBLE_LEN(32),
         .CUSTOM_PREAMBLE_PAT(32'hAAAAAAAA)
     ) dut (
@@ -126,6 +122,24 @@ module tb_mac_fsm_custom;
         end
     endtask
 
+    function automatic ref_scramble_bit;
+        input [6:0] state_in;
+        input       raw_bit;
+        begin
+            ref_scramble_bit = raw_bit ^ state_in[6] ^ state_in[3];
+        end
+    endfunction
+
+    function automatic [6:0] ref_scramble_state;
+        input [6:0] state_in;
+        input       raw_bit;
+        reg         scrambled;
+        begin
+            scrambled = ref_scramble_bit(state_in, raw_bit);
+            ref_scramble_state = {scrambled, state_in[6:1]};
+        end
+    endfunction
+
     task automatic do_reset;
         begin
             rst_n       = 1'b0;
@@ -150,10 +164,12 @@ module tb_mac_fsm_custom;
     endtask
 
     integer t_end;
+    reg [6:0] ref_state;
+    reg [15:0] exp_payload_bits;
 
     initial begin
         $display("============================================================");
-        $display(" tb_mac_fsm_custom : Path B MAC with seed=0 (identity scr)");
+        $display(" tb_mac_fsm_custom : Path B MAC with legal self-sync seed");
         $display("============================================================");
 
         do_reset();
@@ -183,17 +199,19 @@ module tb_mac_fsm_custom;
             chk_bit(i, i[0]);  // i even -> 0, odd -> 1
         end
 
-        // Next 16 bits: {0x5A, 0xA5} LSB first.
-        //   0x5A = 0101_1010  -> LSB-first: 0,1,0,1,1,0,1,0
-        //   0xA5 = 1010_0101  -> LSB-first: 1,0,1,0,0,1,0,1
-        chk_bit(32, 1'b0);  chk_bit(33, 1'b1);
-        chk_bit(34, 1'b0);  chk_bit(35, 1'b1);
-        chk_bit(36, 1'b1);  chk_bit(37, 1'b0);
-        chk_bit(38, 1'b1);  chk_bit(39, 1'b0);
-        chk_bit(40, 1'b1);  chk_bit(41, 1'b0);
-        chk_bit(42, 1'b1);  chk_bit(43, 1'b0);
-        chk_bit(44, 1'b0);  chk_bit(45, 1'b1);
-        chk_bit(46, 1'b0);  chk_bit(47, 1'b1);
+        // Next 16 bits: {0x5A, 0xA5} LSB first, self-synchronously scrambled.
+        ref_state = SCR_SEED;
+        for (i = 0; i < 8; i = i + 1) begin
+            exp_payload_bits[i] = ref_scramble_bit(ref_state, fifo_mem[0][i]);
+            ref_state           = ref_scramble_state(ref_state, fifo_mem[0][i]);
+        end
+        for (i = 0; i < 8; i = i + 1) begin
+            exp_payload_bits[8 + i] = ref_scramble_bit(ref_state, fifo_mem[1][i]);
+            ref_state               = ref_scramble_state(ref_state, fifo_mem[1][i]);
+        end
+        for (i = 0; i < 16; i = i + 1) begin
+            chk_bit(32 + i, exp_payload_bits[i]);
+        end
 
         $display("------------------------------------------------------------");
         $display(" total=%0d  failed=%0d  result=%s", total, fails,

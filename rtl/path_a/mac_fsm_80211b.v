@@ -12,7 +12,7 @@
 // `update_phi1` to the rotator PHY every 11 MHz cycle, and tracks a
 // per-state chip counter (0..10 for Barker, 0..7 for CCK).
 //
-// Scrambler / CRC strategy (Option X as implemented; see design doc):
+// Scrambler / CRC strategy:
 //
 //   - SCRAMBLER, CRC-16 HEC and CRC-32 FCS run on chip for 1/2 Mbps.
 //     Scrambler is initialized at packet start; all 192 preamble+header
@@ -33,7 +33,7 @@
 module mac_fsm_80211b #(
     parameter integer PREAMBLE_SYNC_LEN = 128,
     parameter [15:0]  SFD_PATTERN       = 16'hF3A0,
-    parameter [7:0]   SERVICE_FIELD     = 8'h00,      // Long PLCP default
+    parameter [7:0]   SERVICE_FIELD     = 8'h00,      // bit[2] advertises locked clocks
     parameter [6:0]   SCRAMBLER_SEED    = 7'h6D,
     parameter [10:0]  BARKER_PATTERN    = 11'b10110111000
 ) (
@@ -198,19 +198,33 @@ module mac_fsm_80211b #(
     end
 
     // ------------------------------------------------------------------
-    // Scrambler LFSR (x^7 + x^4 + 1).  Advances at symbol_start for
-    // states where scramble_c is asserted, by 1 step (DBPSK-like) or 2
-    // steps (DQPSK) per symbol.  Idle during S_PSDU_CCK.
+    // Self-synchronous scrambler state (x^7 + x^4 + 1).  Advances at
+    // symbol_start for states where scramble_c is asserted, by 1 step
+    // (DBPSK-like) or 2 serialized steps (DQPSK) per symbol.  Idle
+    // during S_PSDU_CCK because the MCU precomputes the CCK payload path.
     // ------------------------------------------------------------------
     reg  [6:0] lfsr;
-    wire       fb_a          = lfsr[6] ^ lfsr[3];
-    wire [6:0] lfsr_advance1 = {lfsr[5:0], fb_a};
-    wire       fb_b          = lfsr_advance1[6] ^ lfsr_advance1[3];
-    wire [6:0] lfsr_advance2 = {lfsr_advance1[5:0], fb_b};
+    function scramble_bit_ss;
+        input [6:0] state_in;
+        input       raw_bit;
+        begin
+            scramble_bit_ss = raw_bit ^ state_in[6] ^ state_in[3];
+        end
+    endfunction
+    function [6:0] scramble_state_ss;
+        input [6:0] state_in;
+        input       raw_bit;
+        reg         scrambled;
+        begin
+            scrambled = scramble_bit_ss(state_in, raw_bit);
+            scramble_state_ss = {scrambled, state_in[6:1]};
+        end
+    endfunction
 
-    // Scrambled bits for this symbol (computed against pre-shift LFSR).
-    wire s0 = raw_bit_c  ^ lfsr[6];
-    wire s1 = raw_bit2_c ^ lfsr_advance1[6];     // = raw_bit2_c ^ lfsr[5]
+    wire       s0            = scramble_bit_ss(lfsr, raw_bit_c);
+    wire [6:0] lfsr_advance1 = scramble_state_ss(lfsr, raw_bit_c);
+    wire       s1            = scramble_bit_ss(lfsr_advance1, raw_bit2_c);
+    wire [6:0] lfsr_advance2 = scramble_state_ss(lfsr_advance1, raw_bit2_c);
 
     // delta_phi1 for Barker-based symbols.
     // DBPSK (1 bit):  0 -> +0 (phase delta 0),    1 -> +pi (phase delta 2)
@@ -286,8 +300,30 @@ module mac_fsm_80211b #(
     // ------------------------------------------------------------------
     // Header-field load value (LSB-first byte order)
     // ------------------------------------------------------------------
-    wire [7:0]  signal_byte_c = signal_byte_for_rate(rate);
-    wire [31:0] header_load   = { length_us[15:8], length_us[7:0], SERVICE_FIELD, signal_byte_c };
+    function service_length_ext_bit;
+        input [1:0]  r;
+        input [15:0] payload_octets;
+        input [15:0] tx_length_us;
+        reg   [16:0] total_octets;
+        reg   [20:0] rx_octets_no_ext;
+        begin
+            if (r == 2'b11) begin
+                total_octets     = {1'b0, payload_octets} + 17'd4;
+                rx_octets_no_ext = ({5'd0, tx_length_us} * 5'd11) >> 3;
+                service_length_ext_bit = (rx_octets_no_ext > total_octets);
+            end else begin
+                service_length_ext_bit = 1'b0;
+            end
+        end
+    endfunction
+    wire [7:0]  signal_byte_c  = signal_byte_for_rate(rate);
+    wire [7:0]  service_byte_c =
+        { service_length_ext_bit(rate, payload_len, length_us),
+          3'b000,
+          1'b0,
+          SERVICE_FIELD[2],
+          2'b00 };
+    wire [31:0] header_load    = { length_us[15:8], length_us[7:0], service_byte_c, signal_byte_c };
 
     // ------------------------------------------------------------------
     // Total CCK symbol count for PSDU+FCS.

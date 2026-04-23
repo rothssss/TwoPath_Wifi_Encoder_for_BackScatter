@@ -61,7 +61,7 @@ Status pins: `tx_busy`, `tx_done`, `fifo_full`, `underrun`,
  128 bits        16 bits   8       8         16        16        variable        32
 +-----------+  +-------+  +------+---------+---------+--------+  +-----------+  +-----+
 |  SYNC     |  |  SFD  |  |SIGNAL|SERVICE  |LENGTH   | HEC    |  |   PSDU    |  | FCS |
-|  (scr 1's)|  | F3A0  |  | rate |  0x00   | tx time |CRC-16  |  |  payload  |  |CRC32|
+|  (scr 1's)|  | F3A0  |  | rate | dyn/CCK | tx time |CRC-16  |  |  payload  |  |CRC32|
 +-----------+  +-------+  +------+---------+---------+--------+  +-----------+  +-----+
  <-- 1 Mbps DBPSK + Barker, scrambled throughout, HEC on 32 header bits -->  <-- rate-dependent -->
 ```
@@ -91,9 +91,10 @@ so new symbols load cleanly on the following `chip_cnt == 0`.
 
 ### 3.3 On-chip components used for Path A
 
-- **Scrambler** (inline 7-bit LFSR, x⁷ + x⁴ + 1): reset to `SCRAMBLER_SEED`
-  at packet start; advances one step per raw bit consumed (1 step per
-  Barker symbol for DBPSK, 2 steps for DQPSK, 0 steps during S_PSDU_CCK).
+- **Scrambler** (self-synchronous, x⁷ + x⁴ + 1): reset to `SCRAMBLER_SEED`
+  at packet start; each scrambled bit is formed as `data ^ state[6] ^ state[3]`
+  and shifted back into the state. Path A advances one step per DBPSK-style
+  bit, two serialized steps per DQPSK symbol, and 0 steps during S_PSDU_CCK.
 - **HEC** (`crc16_80211_hec`, CRC-16-CCITT-FALSE, init 0xFFFF, XorOut
   0xFFFF): covers the 32 SIGNAL+SERVICE+LENGTH bits.  Transmitted MSB-first.
 - **FCS** (`crc32_80211`, init 0xFFFFFFFF, reflected I/O, XorOut): covers
@@ -135,7 +136,9 @@ Symbol count per packet (PSDU+FCS, where FCS is also pre-encoded by MCU):
 
 The MCU also supplies `length_us` (the LENGTH field value in µs) because
 the spec formulas for 5.5/11 Mbps require a ceil-by-11 division that
-would be expensive in silicon at low Vdd.
+would be expensive in silicon at low Vdd. The chip derives SERVICE bit b7
+from `length_us` for 11 Mbps CCK and uses `SERVICE_FIELD[2]` to advertise
+the optional locked-clocks bit.
 
 ### 3.5 Path A per-chip dataflow
 
@@ -160,7 +163,7 @@ would be expensive in silicon at low Vdd.
 - For `S_PSDU_CCK`, `base_phase` is `c_k` (or `2'b00` when `chip_cnt == 7`).
 - `delta_phi1` comes from:
   - Scrambled data bit for DBPSK: `{s0, 1'b0}` (0 or π)
-  - Scrambled dibit for DQPSK: `{s1, s0}` (Gray-coded QPSK delta)
+  - Scrambled dibit for DQPSK: Table-11 mapping `00→0`, `01→π/2`, `11→π`, `10→3π/2`
   - MCU-supplied field for CCK: `cck_word[1:0]`
 - `update_phi1` pulses one cycle per symbol (at `chip_cnt == 0`), so the
   rotator's accumulator is updated BEFORE the first chip of each symbol

@@ -41,7 +41,7 @@ module multi_mode_tx_baseband #(
     // ---- 802.11b (Path A) tunables ----------------------------------------
     parameter integer PREAMBLE_SYNC_LEN_A = 128,
     parameter [15:0]  SFD_PATTERN_A       = 16'hF3A0,
-    parameter [7:0]   SERVICE_FIELD_A     = 8'h00,
+    parameter [7:0]   SERVICE_FIELD_A     = 8'h00,    // bit[2] optionally advertises locked clocks
     parameter [6:0]   SCRAMBLER_SEED_A    = 7'h6D,
     parameter [10:0]  BARKER_PATTERN      = 11'b10110111000,
     // ---- Custom (Path B) tunables -----------------------------------------
