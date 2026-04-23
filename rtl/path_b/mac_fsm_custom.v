@@ -111,11 +111,10 @@ module mac_fsm_custom #(
     );
 
     // -----------------------------------------------------------------------
-    // Scrambler LFSR (advanced on scrambled bits)
+    // Self-synchronous scrambler state (advanced on scrambled bits)
     // -----------------------------------------------------------------------
     reg  [6:0] lfsr;
-    wire       lfsr_feedback = lfsr[6] ^ lfsr[3];
-    wire       scrambled_bit = raw_bit_c ^ lfsr[6];
+    wire       scrambled_bit = raw_bit_c ^ lfsr[6] ^ lfsr[3];
 
     // -----------------------------------------------------------------------
     // Next-state
@@ -166,7 +165,7 @@ module mac_fsm_custom #(
             bit_out   <= scramble_c ? scrambled_bit : raw_bit_c;
 
             if (valid_c && scramble_c) begin
-                lfsr <= {lfsr[5:0], lfsr_feedback};
+                lfsr <= {scrambled_bit, lfsr[6:1]};
             end
 
             case (state)

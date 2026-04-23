@@ -5,7 +5,8 @@
 
 `tb_mac_fsm_80211b_checks.sv` is a focused Path A regression bench for:
 - Barker payload-byte alignment against the FWFT FIFO contract
-- 2 Mbps DQPSK phase-step mapping
+- 2 Mbps DQPSK phase-step mapping with a legal scrambler seed
+- 11 Mbps SERVICE length-extension encoding
 - CCK low/high byte assembly into `cck_word`
 
 `tb_mac_fsm_custom_checks.sv` is a focused Path B regression bench for:

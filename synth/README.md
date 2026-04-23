@@ -51,7 +51,7 @@ All features are preserved verbatim from the hierarchical sources:
 - Five Path B custom QAM modes (OOK / QPSK / 16-QAM / 64-QAM / 256-QAM).
 - On-chip CRC-16 HEC (poly 0x1021, init/xor 0xFFFF) and CRC-32 FCS
   (reflected poly 0xEDB88320, init/xor 0xFFFFFFFF).
-- x^7 + x^4 + 1 scrambler (separate per path).
+- x^7 + x^4 + 1 self-synchronous scrambler (separate per path).
 - Dual-clock async FIFO with Gray-coded pointers and 2FF synchronizers.
 - Per-domain reset synchronizers, pulse synchronizer for `start_pulse`
   and `tx_done`, and a 2FF synchronizer for `busy`.
@@ -109,7 +109,7 @@ does not require re-running with waves.
 | Testbench                  | Unit / scope                          | Key expected outputs |
 |----------------------------|----------------------------------------|----------------------|
 | `tb_phase_to_iq.sv`        | Gray QPSK phase → (I,Q) truth table    | 4-row truth table    |
-| `tb_scrambler_x7x4.sv`     | x^7 + x^4 + 1 LFSR stream, seed reload | 8-step bit stream    |
+| `tb_scrambler_x7x4.sv`     | x^7 + x^4 + 1 self-synchronous scrambler | step-by-step stream |
 | `tb_crc16_hec.sv`          | CRC-16 HEC `"123456789"`               | `0xD64E`             |
 | `tb_crc32_80211.sv`        | Reflected CRC-32 `"123456789"`         | `0xCBF43926`         |
 | `tb_sync_2ff.sv`           | 2FF synchronizer latency               | 2-edge latency       |

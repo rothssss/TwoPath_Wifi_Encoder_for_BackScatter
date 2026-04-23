@@ -1,21 +1,9 @@
 // =============================================================================
-// tb_scrambler_x7x4 : check the x^7+x^4+1 scrambler's output stream.
+// tb_scrambler_x7x4 : check the x^7+x^4+1 self-synchronous scrambler.
 //
-// Module behaviour (see rtl/common/scrambler_x7x4.v):
-//   lfsr reset-value = DEFAULT_SEED = 7'h5D = 7'b1011101
-//   data_out (combinational) = data_in ^ lfsr[6]
-//   On data_valid: lfsr <= {lfsr[5:0], lfsr[6]^lfsr[3]}
-//
-// Expected output stream for data_in == 0, seed 7'h5D (precomputed):
-//   step : lfsr[6] == data_out
-//     0  :  1        (lfsr=1011101)
-//     1  :  0        (lfsr=0111010)
-//     2  :  1        (lfsr=1110101)
-//     3  :  1        (lfsr=1101011)
-//     4  :  1        (lfsr=1010110)
-//     5  :  0        (lfsr=0101101)
-//     6  :  1        (lfsr=1011011)
-//     7  :  0        (lfsr=0110111)
+// Module behaviour:
+//   data_out  = data_in ^ state[6] ^ state[3]
+//   state_next = {data_out, state[6:1]} on data_valid
 // =============================================================================
 `timescale 1ns/1ps
 
@@ -41,55 +29,89 @@ module tb_scrambler_x7x4;
     integer total = 0;
     integer fails = 0;
 
-    task automatic expect_out(input integer step, input bit exp);
+    task automatic expect_out(input integer step, input bit got, input bit exp);
         begin
             total = total + 1;
-            if (data_out === exp) begin
-                $display("  [PASS] step=%0d data_out=%0b exp=%0b", step, data_out, exp);
+            if (got === exp) begin
+                $display("  [PASS] step=%0d data_out=%0b exp=%0b", step, got, exp);
             end else begin
                 fails = fails + 1;
-                $display("  [FAIL] step=%0d data_out=%0b exp=%0b", step, data_out, exp);
+                $display("  [FAIL] step=%0d data_out=%0b exp=%0b", step, got, exp);
             end
         end
     endtask
 
-    // Precomputed stream for data_in = 0, seed 0x5D: 1 0 1 1 1 0 1 0
-    bit [0:7] exp_stream = 8'b10111010;
+    function automatic ref_scramble_bit;
+        input [6:0] state_in;
+        input       raw_bit;
+        begin
+            ref_scramble_bit = raw_bit ^ state_in[6] ^ state_in[3];
+        end
+    endfunction
 
+    function automatic [6:0] ref_scramble_state;
+        input [6:0] state_in;
+        input       raw_bit;
+        reg         scrambled;
+        begin
+            scrambled = ref_scramble_bit(state_in, raw_bit);
+            ref_scramble_state = {scrambled, state_in[6:1]};
+        end
+    endfunction
+
+    reg [6:0] ref_state;
+    reg [6:0] prev_state;
+    reg [7:0] stim_bits;
     integer i;
 
     initial begin
         $display("============================================================");
-        $display(" tb_scrambler_x7x4 : seed 0x5D, data_in=0 stream");
+        $display(" tb_scrambler_x7x4 : self-synchronous stream check");
         $display("============================================================");
-        data_in = 1'b0;
+        stim_bits = 8'b10110010;
         repeat (2) @(posedge clk);
         rst_n = 1'b1;
         @(posedge clk);
 
-        // Before advancing: data_out is lfsr[6] at reset == 1
-        expect_out(0, exp_stream[0]);
-
-        // Advance the LFSR 7 more times with data_valid
-        for (i = 1; i < 8; i = i + 1) begin
+        for (i = 0; i < 8; i = i + 1) begin
+            @(negedge clk);
+            data_in = stim_bits[i];
+            prev_state = dut.lfsr;
+            #1;
+            expect_out(i, data_out, ref_scramble_bit(prev_state, stim_bits[i]));
             data_valid = 1'b1;
             @(posedge clk);
-            data_valid = 1'b0;
             #1;
-            expect_out(i, exp_stream[i]);
+            data_valid = 1'b0;
+            total = total + 1;
+            if (dut.lfsr === ref_scramble_state(prev_state, stim_bits[i])) begin
+                $display("  [PASS] step=%0d state update", i);
+            end else begin
+                fails = fails + 1;
+                $display("  [FAIL] step=%0d state update", i);
+            end
         end
 
-        // Seed reload restores lfsr => data_out should be 1 again
+        @(negedge clk);
         seed_load = 1'b1;
         @(posedge clk);
-        seed_load = 1'b0;
         #1;
+        seed_load = 1'b0;
         total = total + 1;
-        if (data_out === 1'b1) begin
-            $display("  [PASS] seed reload: data_out=%0b exp=1", data_out);
+        if (dut.lfsr === 7'h5D) begin
+            $display("  [PASS] seed state reload");
         end else begin
             fails = fails + 1;
-            $display("  [FAIL] seed reload: data_out=%0b exp=1", data_out);
+            $display("  [FAIL] seed state reload");
+        end
+        data_in = 1'b0;
+        #1;
+        total = total + 1;
+        if (data_out === ref_scramble_bit(7'h5D, 1'b0)) begin
+            $display("  [PASS] seed reload output");
+        end else begin
+            fails = fails + 1;
+            $display("  [FAIL] seed reload output");
         end
 
         $display("------------------------------------------------------------");
