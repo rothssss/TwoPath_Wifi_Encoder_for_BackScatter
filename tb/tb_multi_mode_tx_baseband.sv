@@ -1,15 +1,21 @@
 // =============================================================================
-// tb_multi_mode_tx_baseband : functional bench for the cut-down Wi-Fi-only TX.
+// tb_multi_mode_tx_baseband : functional bench for the Wi-Fi-only TX.
 //
 // Supported compliant modes:
-//   T_A1   1 Mbps DBPSK         mod_config = 4'b0000
-//   T_A2   2 Mbps DQPSK         mod_config = 4'b0001
+//   T_A1   1   Mbps DBPSK            mod_config = 4'b0000
+//   T_A2   2   Mbps DQPSK            mod_config = 4'b0001
+//   T_A3   5.5 Mbps CCK (offload)    mod_config = 4'b0010
+//   T_A4   11  Mbps CCK (offload)    mod_config = 4'b0011
 //
 // Control / error checks:
 //   T_C1   illegal mod_config values are refused and latch invalid_mode
 //   T_C2   back-to-back DBPSK packets complete cleanly
 //
-// The custom Path B and CCK modes are intentionally removed in this RTL cut.
+// CCK tests stream MCU-precomputed 4-byte symbol words and only verify
+// chip-stream geometry (symbol count, chip count, FIFO drain).  Bit-level
+// validation against a golden CCK encoder is left as a TODO; the stub
+// pattern below uses delta_phi1 = 0 and c_k = 0 so the chip output reduces
+// to a constant phase.
 // =============================================================================
 `timescale 1ns/1ps
 
@@ -27,12 +33,14 @@ module tb_multi_mode_tx_baseband;
     always #(10.0   / 2.0)  clk_custom = ~clk_custom;
     always #(T_MCU   / 2.0) clk_mcu    = ~clk_mcu;
 
-    reg         tx_enable     = 1'b0;
-    reg  [3:0]  mod_config    = 4'd0;
-    reg  [15:0] payload_len   = 16'd0;
-    reg  [15:0] length_us     = 16'd0;
-    reg  [7:0]  payload_in    = 8'd0;
-    reg         payload_write = 1'b0;
+    reg         tx_enable        = 1'b0;
+    reg  [3:0]  mod_config       = 4'd0;
+    reg  [15:0] payload_len      = 16'd0;
+    reg  [15:0] length_field     = 16'd0;
+    reg  [7:0]  service_field    = 8'd0;
+    reg  [15:0] cck_symbol_count = 16'd0;
+    reg  [7:0]  payload_in       = 8'd0;
+    reg         payload_write    = 1'b0;
 
     wire        tx_busy;
     wire        fifo_full;
@@ -46,26 +54,28 @@ module tb_multi_mode_tx_baseband;
     wire        chip_valid;
 
     multi_mode_tx_baseband dut (
-        .clk_b_chip   (clk_b_chip),
-        .clk_custom   (clk_custom),
-        .clk_mcu      (clk_mcu),
-        .rst_n        (rst_n),
-        .tx_enable    (tx_enable),
-        .mod_config   (mod_config),
-        .payload_len  (payload_len),
-        .length_us    (length_us),
-        .payload_in   (payload_in),
-        .payload_write(payload_write),
-        .tx_busy      (tx_busy),
-        .fifo_full    (fifo_full),
-        .underrun     (underrun),
-        .invalid_mode (invalid_mode),
-        .tx_done      (tx_done),
-        .symbol_out   (symbol_out),
-        .symbol_valid (symbol_valid),
-        .chip_i       (chip_i),
-        .chip_q       (chip_q),
-        .chip_valid   (chip_valid)
+        .clk_b_chip      (clk_b_chip),
+        .clk_custom      (clk_custom),
+        .clk_mcu         (clk_mcu),
+        .rst_n           (rst_n),
+        .tx_enable       (tx_enable),
+        .mod_config      (mod_config),
+        .payload_len     (payload_len),
+        .length_field    (length_field),
+        .service_field   (service_field),
+        .cck_symbol_count(cck_symbol_count),
+        .payload_in      (payload_in),
+        .payload_write   (payload_write),
+        .tx_busy         (tx_busy),
+        .fifo_full       (fifo_full),
+        .underrun        (underrun),
+        .invalid_mode    (invalid_mode),
+        .tx_done         (tx_done),
+        .symbol_out      (symbol_out),
+        .symbol_valid    (symbol_valid),
+        .chip_i          (chip_i),
+        .chip_q          (chip_q),
+        .chip_valid      (chip_valid)
     );
 
     integer chip_valid_cnt   = 0;
@@ -126,13 +136,15 @@ module tb_multi_mode_tx_baseband;
 
     task automatic do_reset;
         begin
-            rst_n         = 1'b0;
-            tx_enable     = 1'b0;
-            mod_config    = 4'b0000;
-            payload_len   = 16'd0;
-            length_us     = 16'd0;
-            payload_in    = 8'd0;
-            payload_write = 1'b0;
+            rst_n            = 1'b0;
+            tx_enable        = 1'b0;
+            mod_config       = 4'b0000;
+            payload_len      = 16'd0;
+            length_field     = 16'd0;
+            service_field    = 8'd0;
+            cck_symbol_count = 16'd0;
+            payload_in       = 8'd0;
+            payload_write    = 1'b0;
             #(T_BCHIP * 5);
             rst_n = 1'b1;
             #(T_BCHIP * 5);
@@ -184,11 +196,37 @@ module tb_multi_mode_tx_baseband;
     endtask
 
     task automatic configure(input [3:0] mc, input [15:0] plen);
+        integer length_us_eq;
+        begin
+            // Default LENGTH for Barker rates (cheap on-chip math the MCU
+            // would mirror in software):
+            //   1 Mbps : LENGTH = 8 * N
+            //   2 Mbps : LENGTH = 4 * N
+            // CCK rates set length_field/service_field/cck_symbol_count
+            // directly via configure_cck before pulse_tx_enable.
+            length_us_eq = (mc[1:0] == 2'b00) ? (plen << 3) :
+                           (mc[1:0] == 2'b01) ? (plen << 2) : 0;
+            @(posedge clk_mcu); #1;
+            mod_config       = mc;
+            payload_len      = plen;
+            length_field     = length_us_eq[15:0];
+            service_field    = 8'h00;
+            cck_symbol_count = 16'd0;
+        end
+    endtask
+
+    task automatic configure_cck(input [3:0]  mc,
+                                 input [15:0] plen,
+                                 input [15:0] sym_count,
+                                 input [15:0] length_us_in,
+                                 input [7:0]  service_in);
         begin
             @(posedge clk_mcu); #1;
-            mod_config  = mc;
-            payload_len = plen;
-            length_us   = 16'd0;
+            mod_config       = mc;
+            payload_len      = plen;
+            length_field     = length_us_in;
+            service_field    = service_in;
+            cck_symbol_count = sym_count;
         end
     endtask
 
@@ -231,7 +269,7 @@ module tb_multi_mode_tx_baseband;
             $display("\n--- %s : mod_config=%b payload_len=%0d ---", name, mc, plen);
             do_reset;
             configure(mc, plen[15:0]);
-            check_true("payload bytes fit in 8-deep FIFO", plen <= 8);
+            check_true("payload bytes fit in 16-deep FIFO", plen <= 16);
             write_bytes(plen, 8'hA0);
             snap_counters;
             pulse_tx_enable;
@@ -246,6 +284,52 @@ module tb_multi_mode_tx_baseband;
             check_true("tx_busy returned low", !tx_busy);
             check_eq  ("symbol_out tied low", symbol_out, 0);
             check_true("symbol_valid pin low", !symbol_valid);
+        end
+    endtask
+
+    // CCK directed test stub.  Streams `cck_sym_count` symbols of a stand-in
+    // pre-encoded pattern (delta_phi1=0, c_k=0) through the FIFO and confirms
+    // the chip drains the right number of FIFO bytes and emits the right
+    // number of chips.  Bit-level golden-vector check is a TODO.
+    task automatic run_cck_test(input string  name,
+                                input [3:0]   mc,
+                                input integer cck_sym_count_in,
+                                input [15:0]  length_us_in,
+                                input [7:0]   service_in);
+        integer timeout_ns;
+        integer i;
+        integer exp_chips;
+        bit     done_seen;
+        localparam integer HDR_SYMS_A_LOC  = 128 + 16 + 32 + 16;
+        localparam integer HDR_CHIPS_A_LOC = HDR_SYMS_A_LOC * 11;
+        begin
+            current_test = name;
+            $display("\n--- %s : mod_config=%b cck_sym_count=%0d ---",
+                     name, mc, cck_sym_count_in);
+            do_reset;
+            configure_cck(mc, 16'd0, cck_sym_count_in[15:0], length_us_in, service_in);
+
+            // Push 4 bytes per CCK symbol.  Stub pattern: all zeros (i.e.
+            // delta_phi1=0, c_k0..c_k7=0).  Replace with a golden pattern
+            // generated from MATLAB wlanWaveformGenerator or equivalent.
+            for (i = 0; i < 4 * cck_sym_count_in; i = i + 1) begin
+                write_byte(8'h00);
+            end
+
+            snap_counters;
+            pulse_tx_enable;
+            timeout_ns = 5_000_000;
+            wait_for_tx_done(timeout_ns, done_seen);
+
+            exp_chips = HDR_CHIPS_A_LOC + 8 * cck_sym_count_in;
+
+            check_true("tx_done pulsed once", done_seen);
+            check_eq  ("tx_done pulse count", delta_done(), 1);
+            check_eq  ("chip_valid pulses", delta_chip(), exp_chips);
+            check_eq  ("symbol_valid remains low", delta_sym(), 0);
+            check_eq  ("no underrun", delta_ur(), 0);
+            check_true("invalid_mode clear", !invalid_mode);
+            check_true("tx_busy returned low", !tx_busy);
         end
     endtask
 
@@ -265,11 +349,11 @@ module tb_multi_mode_tx_baseband;
             current_test = "T_C1 invalid mod_config";
             $display("\n--- %s ---", current_test);
             do_reset;
-            configure(4'b0010, 16'd4);
+            configure(4'b0100, 16'd4);
             snap_counters;
             pulse_tx_enable;
             #(T_MCU * 10);
-            check_true("CCK mode is rejected", invalid_mode);
+            check_true("0100 mode is rejected", invalid_mode);
             check_true("tx_busy stayed low", !tx_busy);
             check_eq  ("no tx_done pulse", delta_done(), 0);
             check_eq  ("no chip_valid pulses", delta_chip(), 0);
@@ -279,12 +363,21 @@ module tb_multi_mode_tx_baseband;
             configure(4'b1000, 16'd4);
             pulse_tx_enable;
             #(T_MCU * 10);
-            check_true("custom mode is rejected", invalid_mode);
+            check_true("1000 mode is rejected", invalid_mode);
             check_true("tx_busy stayed low", !tx_busy);
         end
 
         run_path_a_test("T_A1 1 Mbps DBPSK", 4'b0000, 4, chips_path_a(1'b0, 4));
         run_path_a_test("T_A2 2 Mbps DQPSK", 4'b0001, 4, chips_path_a(1'b1, 4));
+
+        // CCK regression: 5.5 Mbps with a 2-symbol stub stream.  4 bytes per
+        // symbol => 8 FIFO bytes total, comfortably inside the 16-byte FIFO.
+        // length_us / service stub values match a 1-octet payload at 5.5 Mbps
+        // (LENGTH = ceil(8*1/4) = 2 us, SERVICE = 0).
+        run_cck_test("T_A3 5.5 Mbps CCK stub", 4'b0010, 2, 16'd2, 8'h00);
+
+        // CCK regression: 11 Mbps, 2 symbols.
+        run_cck_test("T_A4 11 Mbps CCK stub", 4'b0011, 2, 16'd2, 8'h00);
 
         begin : t_c2
             bit     done_seen;

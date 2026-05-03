@@ -1,31 +1,42 @@
 // =============================================================================
-// multi_mode_tx_baseband : cut-down 802.11b backscatter TX baseband.
+// multi_mode_tx_baseband : 802.11b backscatter TX baseband.
 //
-// This revision intentionally removes all non-Wi-Fi and high-rate 802.11b
-// features to reduce synthesized area while preserving commercial-receiver
-// compatibility for the two most robust compliant modes:
+// Supported PSDU rates (all on chip_i / chip_q at 11 Mchip/s):
+//   mod_config = 4'b0000 : 1   Mbps DBPSK + 11-chip Barker (chip computes)
+//   mod_config = 4'b0001 : 2   Mbps DQPSK + 11-chip Barker (chip computes)
+//   mod_config = 4'b0010 : 5.5 Mbps CCK   (MCU pre-computes; chip streams)
+//   mod_config = 4'b0011 : 11  Mbps CCK   (MCU pre-computes; chip streams)
 //
-//   mod_config = 4'b0000 : 1 Mbps  DBPSK + 11-chip Barker
-//   mod_config = 4'b0001 : 2 Mbps  DQPSK + 11-chip Barker
+// All other mod_config values are illegal, refused at start, and latched
+// into invalid_mode.
 //
-// All other `mod_config` values are illegal, refused at start, and latched
-// into `invalid_mode`.
+// MCU offload contract for CCK:
+//   For mod_config = 4'b001x the MCU is responsible for self-synchronous
+//   scrambling, CRC-32, 8-chip CCK encoding (incl. odd-symbol +pi and
+//   chip-3/chip-6 hardwired +pi), the LENGTH and SERVICE field values, and
+//   the cck_symbol_count for the PLCP PSDU+FCS region.  See
+//   rtl/path_a/mac_fsm_80211b.v header for the per-symbol packing format
+//   on the FIFO write port.
 //
-// Interface compatibility notes:
-//   * `clk_custom`, `length_us`, `symbol_out`, and `symbol_valid` are retained
-//     as ports so existing integration wrappers do not need a pinout change.
-//     They are deprecated and unused in this Wi-Fi-only cut.
-//   * Path B custom QAM, CCK, and the clock mux are removed from the RTL.
-//   * The FIFO read side is now always `clk_b_chip`.
+// Interface notes:
+//   * length_field replaces the previously-deprecated length_us port and is
+//     used at every rate (Barker rates set it to LENGTH = 8 * N_octets for
+//     1 Mbps or 4 * N_octets for 2 Mbps).
+//   * service_field is a per-packet 8-bit input, replacing the old
+//     compile-time SERVICE_FIELD_A parameter.  This lets the MCU set
+//     LENGTH_EXTENSION (bit 7) and LOCKED_CLOCKS (bit 2) per packet.
+//   * cck_symbol_count is read only by CCK rates; it is ignored otherwise.
+//   * clk_custom, symbol_out, and symbol_valid are still retained as ports
+//     for wrapper-pinout stability and remain unused.
+//   * The FIFO read side is always clk_b_chip.
 // =============================================================================
 module multi_mode_tx_baseband #(
     parameter integer PREAMBLE_SYNC_LEN_A = 128,
     parameter [15:0]  SFD_PATTERN_A       = 16'hF3A0,
-    parameter [7:0]   SERVICE_FIELD_A     = 8'h00,
     parameter [6:0]   SCRAMBLER_SEED_A    = 7'h6D,
     parameter [10:0]  BARKER_PATTERN      = 11'b10110111000,
-    parameter integer FIFO_DEPTH          = 8,
-    parameter integer FIFO_ADDR_W         = 3
+    parameter integer FIFO_DEPTH          = 16,
+    parameter integer FIFO_ADDR_W         = 4
 ) (
     input  wire        clk_b_chip,
     input  wire        clk_custom,
@@ -35,7 +46,9 @@ module multi_mode_tx_baseband #(
     input  wire        tx_enable,
     input  wire [3:0]  mod_config,
     input  wire [15:0] payload_len,
-    input  wire [15:0] length_us,
+    input  wire [15:0] length_field,
+    input  wire [7:0]  service_field,
+    input  wire [15:0] cck_symbol_count,
 
     input  wire [7:0]  payload_in,
     input  wire        payload_write,
@@ -64,14 +77,14 @@ module multi_mode_tx_baseband #(
 
     // =======================================================================
     // Mode decode
-    //   Only 0000 and 0001 remain legal.
+    //   Legal: 0000, 0001, 0010, 0011.
     // =======================================================================
     reg mod_valid_c;
     always @(*) begin
-        mod_valid_c = (mod_config == 4'b0000) || (mod_config == 4'b0001);
+        mod_valid_c = (mod_config[3:2] == 2'b00);
     end
-    wire mod_valid   = mod_valid_c;
-    wire path_a_rate = mod_config[0];  // 0=DBPSK, 1=DQPSK
+    wire       mod_valid = mod_valid_c;
+    wire [1:0] rate_mode = mod_config[1:0];
 
     // =======================================================================
     // tx_enable edge detect in clk_mcu
@@ -122,7 +135,7 @@ module multi_mode_tx_baseband #(
     );
 
     // =======================================================================
-    // Path A only: 802.11b 1/2 Mbps Long PLCP + rotator
+    // Path A only: 802.11b 1/2/5.5/11 Mbps Long PLCP + rotator
     // =======================================================================
     wire       a_fifo_rd_en;
     wire       a_busy;
@@ -139,25 +152,27 @@ module multi_mode_tx_baseband #(
     mac_fsm_80211b #(
         .PREAMBLE_SYNC_LEN(PREAMBLE_SYNC_LEN_A),
         .SFD_PATTERN     (SFD_PATTERN_A),
-        .SERVICE_FIELD   (SERVICE_FIELD_A),
         .SCRAMBLER_SEED  (SCRAMBLER_SEED_A),
         .BARKER_PATTERN  (BARKER_PATTERN)
     ) u_mac_a (
-        .clk          (clk_b_chip),
-        .rst_n        (rst_n_b_chip_s),
-        .start_pulse  (start_pulse_a),
-        .rate         (path_a_rate),
-        .payload_len  (payload_len),
-        .busy         (a_busy),
-        .done_pulse   (a_done),
-        .fifo_rd_en   (a_fifo_rd_en),
-        .fifo_empty   (fifo_empty),
-        .fifo_rd_data (fifo_rd_data),
-        .underrun_flag(a_underrun),
-        .base_phase   (a_base_phase),
-        .delta_phi1   (a_delta_phi1),
-        .update_phi1  (a_update_phi1),
-        .chip_valid   (a_chip_valid_to_phy)
+        .clk             (clk_b_chip),
+        .rst_n           (rst_n_b_chip_s),
+        .start_pulse     (start_pulse_a),
+        .rate_mode       (rate_mode),
+        .payload_len     (payload_len),
+        .length_field    (length_field),
+        .service_field   (service_field),
+        .cck_symbol_count(cck_symbol_count),
+        .busy            (a_busy),
+        .done_pulse      (a_done),
+        .fifo_rd_en      (a_fifo_rd_en),
+        .fifo_empty      (fifo_empty),
+        .fifo_rd_data    (fifo_rd_data),
+        .underrun_flag   (a_underrun),
+        .base_phase      (a_base_phase),
+        .delta_phi1      (a_delta_phi1),
+        .update_phi1     (a_update_phi1),
+        .chip_valid      (a_chip_valid_to_phy)
     );
 
     phy_a_rotator u_phy_a (

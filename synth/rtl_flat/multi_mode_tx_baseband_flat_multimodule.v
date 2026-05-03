@@ -475,28 +475,64 @@ module phy_a_rotator (
 
 endmodule
 
-
 // =============================================================================
-// mac_fsm_80211b : 802.11b Long PLCP MAC/PLCP engine for 1 and 2 Mbps only.
+// mac_fsm_80211b : 802.11b Long PLCP MAC/PLCP engine for 1, 2, 5.5, and 11
+// Mbps.  CCK rates use an MCU offload contract: the MCU pre-computes the
+// 8-chip CCK symbol pattern in software and ships it as 4 packed FIFO bytes
+// per symbol, which this MAC streams straight to phy_a_rotator.
 //
-//   rate = 1'b0 : 1 Mbps DBPSK + 11-chip Barker
-//   rate = 1'b1 : 2 Mbps DQPSK + 11-chip Barker
+//   rate_mode = 2'b00 : 1   Mbps DBPSK + 11-chip Barker (chip computes everything)
+//   rate_mode = 2'b01 : 2   Mbps DQPSK + 11-chip Barker (chip computes everything)
+//   rate_mode = 2'b10 : 5.5 Mbps CCK   (MCU pre-computes; chip streams)
+//   rate_mode = 2'b11 : 11  Mbps CCK   (MCU pre-computes; chip streams)
 //
-// The cut-down Wi-Fi-only variant removes:
-//   * 5.5 / 11 Mbps CCK support
-//   * the off-chip CCK payload contract
-//   * external LENGTH-field input for higher-rate rounding
-//
-// PLCP framing remains standards-facing for the retained rates:
+// PLCP framing (always Long preamble per IEEE 802.11-2016 sec 16.2.3):
 //   SYNC(128) | SFD(16) | SIGNAL(8) | SERVICE(8) | LENGTH(16) | HEC(16) | PSDU | FCS
 //
-// Preamble + header are always scrambled and transmitted as DBPSK+Barker.
-// PSDU and FCS are scrambled and CRC-32 protected on chip.
+// SYNC/SFD/SIGNAL/SERVICE/LENGTH/HEC are always 1 Mbps DBPSK + Barker.
+// That matches what a commercial 802.11b Long-PLCP receiver expects to
+// see for every PSDU rate.
+//
+// MCU contract for CCK rates:
+//   The MCU is responsible for performing, in software:
+//     - self-synchronous scrambling (sec 16.2.4) of the payload bitstream;
+//     - CRC-32 (sec 16.2.3.6) over the scrambled payload;
+//     - 8-chip CCK encoding (sec 16.4.6) of the scrambled-payload + FCS bits;
+//     - the sec 16.4.6.3 odd-symbol +pi correction, folded into delta_phi1;
+//     - the sec 16.4.6 chip-3 / chip-6 hard-wired +pi, folded into c_k.
+//   The chip side never touches scrambler / CRC / Barker for CCK PSDU+FCS;
+//   it only replays the QPSK chip phases through phy_a_rotator.
+//
+// CCK symbol packing (LSB-first across 4 FIFO bytes per CCK symbol):
+//   bits[1:0]    = delta_phi1[1:0]    (DQPSK delta for d1, with the
+//                                      sec 16.4.6.3 odd-symbol +pi already
+//                                      folded in)
+//   bits[3:2]    = c_k0[1:0]
+//   bits[5:4]    = c_k1[1:0]
+//   bits[7:6]    = c_k2[1:0]
+//   bits[9:8]    = c_k3[1:0]          (c_k3 already includes +pi)
+//   bits[11:10]  = c_k4[1:0]
+//   bits[13:12]  = c_k5[1:0]
+//   bits[15:14]  = c_k6[1:0]          (c_k6 already includes +pi)
+//   bits[17:16]  = c_k7[1:0]
+//   bits[31:18]  = reserved (MCU writes 0)
+//
+//   FIFO bytes consumed per CCK packet = 4 * cck_symbol_count.
+//
+// MCU-supplied per-packet inputs:
+//   length_field    : 16-bit LENGTH for the PLCP header (sec 16.2.3.5).
+//                     Used at every rate.
+//   service_field   : 8-bit SERVICE byte (sec 16.2.3.4), with LENGTH_EXTENSION
+//                     in bit 7 and LOCKED_CLOCKS in bit 2.  Used at every rate.
+//   cck_symbol_count: number of 8-chip CCK symbols making up PSDU+FCS.
+//                     Used only for CCK rates; ignored for Barker rates.
+//
+// For Barker rates, payload_len is the raw-payload byte count and the chip
+// computes the scrambler / CRC-32 / Barker chip stream on its own.
 // =============================================================================
 module mac_fsm_80211b #(
     parameter integer PREAMBLE_SYNC_LEN = 128,
     parameter [15:0]  SFD_PATTERN       = 16'hF3A0,
-    parameter [7:0]   SERVICE_FIELD     = 8'h00,
     parameter [6:0]   SCRAMBLER_SEED    = 7'h6D,
     parameter [10:0]  BARKER_PATTERN    = 11'b10110111000
 ) (
@@ -504,8 +540,11 @@ module mac_fsm_80211b #(
     input  wire        rst_n,
 
     input  wire        start_pulse,
-    input  wire        rate,
+    input  wire [1:0]  rate_mode,
     input  wire [15:0] payload_len,
+    input  wire [15:0] length_field,
+    input  wire [7:0]  service_field,
+    input  wire [15:0] cck_symbol_count,
 
     output reg         busy,
     output reg         done_pulse,
@@ -522,32 +561,43 @@ module mac_fsm_80211b #(
 );
 
     function [7:0] signal_byte_for_rate;
-        input r;
+        input [1:0] r;
         begin
-            signal_byte_for_rate = r ? 8'h14 : 8'h0A;
+            case (r)
+                2'b00:   signal_byte_for_rate = 8'h0A; // 1   Mbps
+                2'b01:   signal_byte_for_rate = 8'h14; // 2   Mbps
+                2'b10:   signal_byte_for_rate = 8'h37; // 5.5 Mbps
+                2'b11:   signal_byte_for_rate = 8'h6E; // 11  Mbps
+                default: signal_byte_for_rate = 8'h0A;
+            endcase
         end
     endfunction
 
-    localparam [2:0]
-        S_IDLE        = 3'd0,
-        S_SYNC        = 3'd1,
-        S_SFD         = 3'd2,
-        S_HEAD        = 3'd3,
-        S_HEC         = 3'd4,
-        S_PSDU_BARKER = 3'd5,
-        S_FCS_BARKER  = 3'd6,
-        S_DONE        = 3'd7;
+    localparam [3:0]
+        S_IDLE        = 4'd0,
+        S_SYNC        = 4'd1,
+        S_SFD         = 4'd2,
+        S_HEAD        = 4'd3,
+        S_HEC         = 4'd4,
+        S_PSDU_BARKER = 4'd5,
+        S_FCS_BARKER  = 4'd6,
+        S_PSDU_CCK    = 4'd7,
+        S_DONE        = 4'd8;
 
-    reg [2:0] state, state_next;
-    reg       rate_q;
+    reg [3:0] state, state_next;
+    reg [1:0] rate_mode_q;
+    wire      cck_active = rate_mode_q[1];
 
     reg  [3:0] chip_cnt;
+    wire [3:0] chip_max     = (state == S_PSDU_CCK) ? 4'd7 : 4'd10;
     wire       symbol_start = (chip_cnt == 4'd0);
-    wire       symbol_end   = (chip_cnt == 4'd10);
+    wire       symbol_end   = (chip_cnt == chip_max);
 
     reg  [15:0] payload_len_q;
+    reg  [15:0] cck_sym_count_q;
     reg  [7:0]  sym_cnt;
     reg  [15:0] byte_cnt;
+    reg  [15:0] cck_sym_cnt;
     reg  [2:0]  bit_in_byte;
 
     reg  [7:0]  byte_sr;
@@ -555,6 +605,12 @@ module mac_fsm_80211b #(
     reg  [15:0] sfd_sr;
     reg  [15:0] hec_sr;
     reg  [31:0] fcs_sr;
+
+    // CCK symbol streamer: cck_word_curr feeds the 8 chips of the symbol
+    // currently emitting; cck_word_next buffers the next symbol's 4 bytes
+    // while the current symbol is still on the wire.
+    reg  [31:0] cck_word_curr;
+    reg  [31:0] cck_word_next;
 
     reg         crc_init;
 
@@ -607,7 +663,7 @@ module mac_fsm_80211b #(
                 raw_bit_c     = byte_sr[0];
                 raw_bit2_c    = byte_sr[1];
                 scramble_c    = 1'b1;
-                two_bit_sym_c = rate_q;
+                two_bit_sym_c = rate_mode_q[0];
                 feed_fcs_c    = 1'b1;
                 emit_chip_c   = 1'b1;
             end
@@ -615,7 +671,12 @@ module mac_fsm_80211b #(
                 raw_bit_c     = fcs_source[0];
                 raw_bit2_c    = fcs_source[1];
                 scramble_c    = 1'b1;
-                two_bit_sym_c = rate_q;
+                two_bit_sym_c = rate_mode_q[0];
+                emit_chip_c   = 1'b1;
+            end
+            S_PSDU_CCK: begin
+                // Chip pattern is replayed straight from cck_word_curr; no
+                // chip-side scrambler / Barker / CRC engagement.
                 emit_chip_c   = 1'b1;
             end
             default: ;
@@ -623,7 +684,7 @@ module mac_fsm_80211b #(
     end
 
     // ------------------------------------------------------------------
-    // Self-synchronous scrambler
+    // Self-synchronous scrambler (Barker rates only)
     // ------------------------------------------------------------------
     reg  [6:0] lfsr;
     function scramble_bit_ss;
@@ -665,8 +726,25 @@ module mac_fsm_80211b #(
     wire [1:0] delta_phi1_barker =
         two_bit_sym_c ? dqpsk_delta_from_bits(s0, s1) : {s0, 1'b0};
 
-    wire barker_chip_bit = BARKER_PATTERN[10 - chip_cnt[3:0]];
+    wire barker_chip_bit       = BARKER_PATTERN[10 - chip_cnt[3:0]];
     wire [1:0] base_phase_barker = barker_chip_bit ? 2'b00 : 2'b10;
+
+    // CCK chip-phase mux: select c_k for the current chip from cck_word_curr.
+    reg [1:0] cck_chip_phase;
+    always @(*) begin
+        case (chip_cnt[2:0])
+            3'd0:   cck_chip_phase = cck_word_curr[3:2];
+            3'd1:   cck_chip_phase = cck_word_curr[5:4];
+            3'd2:   cck_chip_phase = cck_word_curr[7:6];
+            3'd3:   cck_chip_phase = cck_word_curr[9:8];
+            3'd4:   cck_chip_phase = cck_word_curr[11:10];
+            3'd5:   cck_chip_phase = cck_word_curr[13:12];
+            3'd6:   cck_chip_phase = cck_word_curr[15:14];
+            3'd7:   cck_chip_phase = cck_word_curr[17:16];
+            default:cck_chip_phase = 2'd0;
+        endcase
+    end
+    wire [1:0] cck_delta_phi1 = cck_word_curr[1:0];
 
     crc16_80211_hec u_hec (
         .clk       (clk),
@@ -694,15 +772,12 @@ module mac_fsm_80211b #(
         .crc_out   (fcs_out)
     );
 
-    // LENGTH is cheap again for the retained rates:
-    //   1 Mbps -> 8 * payload_len us
-    //   2 Mbps -> 4 * payload_len us
-    wire [15:0] length_field_c = rate ? (payload_len << 2) : (payload_len << 3);
+    // Header is loaded from MCU-supplied LENGTH and SERVICE for all rates.
     wire [31:0] header_load = {
-        length_field_c[15:8],
-        length_field_c[7:0],
-        SERVICE_FIELD,
-        signal_byte_for_rate(rate)
+        length_field[15:8],
+        length_field[7:0],
+        service_field,
+        signal_byte_for_rate(rate_mode)
     };
 
     always @(*) begin
@@ -712,21 +787,30 @@ module mac_fsm_80211b #(
             S_SYNC       : if (symbol_end && sym_cnt == PREAMBLE_SYNC_LEN - 1) state_next = S_SFD;
             S_SFD        : if (symbol_end && sym_cnt == 8'd15)                 state_next = S_HEAD;
             S_HEAD       : if (symbol_end && sym_cnt == 8'd31)                 state_next = S_HEC;
-            S_HEC        : if (symbol_end && sym_cnt == 8'd15)
-                               state_next = (payload_len_q == 16'd0) ? S_FCS_BARKER : S_PSDU_BARKER;
+            S_HEC        : if (symbol_end && sym_cnt == 8'd15) begin
+                if (cck_active) begin
+                    state_next = (cck_sym_count_q == 16'd0) ? S_DONE : S_PSDU_CCK;
+                end else begin
+                    state_next = (payload_len_q == 16'd0) ? S_FCS_BARKER : S_PSDU_BARKER;
+                end
+            end
             S_PSDU_BARKER: begin
                 if (symbol_end && byte_cnt == payload_len_q - 16'd1) begin
-                    if ((!rate_q && bit_in_byte == 3'd7) ||
-                        ( rate_q && bit_in_byte == 3'd6))
+                    if ((!rate_mode_q[0] && bit_in_byte == 3'd7) ||
+                        ( rate_mode_q[0] && bit_in_byte == 3'd6))
                         state_next = S_FCS_BARKER;
                 end
             end
             S_FCS_BARKER : begin
                 if (symbol_end) begin
-                    if ((!rate_q && sym_cnt == 8'd31) ||
-                        ( rate_q && sym_cnt == 8'd15))
+                    if ((!rate_mode_q[0] && sym_cnt == 8'd31) ||
+                        ( rate_mode_q[0] && sym_cnt == 8'd15))
                         state_next = S_DONE;
                 end
+            end
+            S_PSDU_CCK   : begin
+                if (symbol_end && cck_sym_cnt == cck_sym_count_q - 16'd1)
+                    state_next = S_DONE;
             end
             S_DONE       : state_next = S_IDLE;
             default      : state_next = S_IDLE;
@@ -736,17 +820,21 @@ module mac_fsm_80211b #(
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
             state              <= S_IDLE;
-            rate_q             <= 1'b0;
+            rate_mode_q        <= 2'd0;
             chip_cnt           <= 4'd0;
             sym_cnt            <= 8'd0;
             byte_cnt           <= 16'd0;
+            cck_sym_cnt        <= 16'd0;
             bit_in_byte        <= 3'd0;
             payload_len_q      <= 16'd0;
+            cck_sym_count_q    <= 16'd0;
             byte_sr            <= 8'd0;
             header_sr          <= 32'd0;
             sfd_sr             <= 16'd0;
             hec_sr             <= 16'd0;
             fcs_sr             <= 32'd0;
+            cck_word_curr      <= 32'd0;
+            cck_word_next      <= 32'd0;
             lfsr               <= SCRAMBLER_SEED;
             crc_init           <= 1'b0;
             fifo_rd_en         <= 1'b0;
@@ -765,10 +853,11 @@ module mac_fsm_80211b #(
             update_phi1 <= 1'b0;
             chip_valid  <= emit_chip_c;
 
-            base_phase <= base_phase_barker;
+            // Drive base_phase / delta_phi1 from the rate-appropriate source.
+            base_phase  <= (state == S_PSDU_CCK) ? cck_chip_phase : base_phase_barker;
             if (symbol_start && emit_chip_c) begin
                 update_phi1 <= 1'b1;
-                delta_phi1  <= delta_phi1_barker;
+                delta_phi1  <= (state == S_PSDU_CCK) ? cck_delta_phi1 : delta_phi1_barker;
             end
 
             if (symbol_start && scramble_c) begin
@@ -782,18 +871,22 @@ module mac_fsm_80211b #(
                 S_IDLE: begin
                     busy <= 1'b0;
                     if (start_pulse) begin
-                        rate_q        <= rate;
-                        payload_len_q <= payload_len;
-                        sym_cnt       <= 8'd0;
-                        byte_cnt      <= 16'd0;
-                        bit_in_byte   <= 3'd0;
-                        chip_cnt      <= 4'd0;
-                        sfd_sr        <= SFD_PATTERN;
-                        header_sr     <= header_load;
-                        lfsr          <= SCRAMBLER_SEED;
-                        crc_init      <= 1'b1;
-                        underrun_flag <= 1'b0;
-                        busy          <= 1'b1;
+                        rate_mode_q     <= rate_mode;
+                        payload_len_q   <= payload_len;
+                        cck_sym_count_q <= cck_symbol_count;
+                        sym_cnt         <= 8'd0;
+                        byte_cnt        <= 16'd0;
+                        cck_sym_cnt     <= 16'd0;
+                        bit_in_byte     <= 3'd0;
+                        chip_cnt        <= 4'd0;
+                        sfd_sr          <= SFD_PATTERN;
+                        header_sr       <= header_load;
+                        cck_word_curr   <= 32'd0;
+                        cck_word_next   <= 32'd0;
+                        lfsr            <= SCRAMBLER_SEED;
+                        crc_init        <= 1'b1;
+                        underrun_flag   <= 1'b0;
+                        busy            <= 1'b1;
                     end
                 end
 
@@ -818,17 +911,41 @@ module mac_fsm_80211b #(
                 end
 
                 S_HEC: begin
+                    // CCK preload: during the LAST HEC symbol's chips 4..7,
+                    // pull 4 bytes from the FIFO into cck_word_next so that
+                    // chip 0 of S_PSDU_CCK can emit with no bubble.
+                    if (cck_active && sym_cnt == 8'd15 &&
+                        chip_cnt >= 4'd4 && chip_cnt <= 4'd7 &&
+                        cck_sym_count_q != 16'd0) begin
+                        if (!fifo_empty) begin
+                            case (chip_cnt[1:0])
+                                2'd0: cck_word_next[7:0]   <= fifo_rd_data;
+                                2'd1: cck_word_next[15:8]  <= fifo_rd_data;
+                                2'd2: cck_word_next[23:16] <= fifo_rd_data;
+                                2'd3: cck_word_next[31:24] <= fifo_rd_data;
+                            endcase
+                            fifo_rd_en <= 1'b1;
+                        end else begin
+                            underrun_flag <= 1'b1;
+                        end
+                    end
+
                     if (symbol_end) begin
                         if (sym_cnt == 8'd0) hec_sr <= {hec_out[14:0], 1'b0};
                         else                 hec_sr <= {hec_sr[14:0], 1'b0};
                         sym_cnt <= (sym_cnt == 8'd15) ? 8'd0 : sym_cnt + 8'd1;
 
-                        if (sym_cnt == 8'd15 && payload_len_q != 16'd0) begin
-                            if (!fifo_empty) begin
-                                byte_sr <= fifo_rd_data;
-                                if (payload_len_q > 16'd1) fifo_rd_en <= 1'b1;
-                            end else begin
-                                underrun_flag <= 1'b1;
+                        if (sym_cnt == 8'd15) begin
+                            if (cck_active) begin
+                                cck_word_curr <= cck_word_next;
+                                cck_sym_cnt   <= 16'd0;
+                            end else if (payload_len_q != 16'd0) begin
+                                if (!fifo_empty) begin
+                                    byte_sr <= fifo_rd_data;
+                                    if (payload_len_q > 16'd1) fifo_rd_en <= 1'b1;
+                                end else begin
+                                    underrun_flag <= 1'b1;
+                                end
                             end
                         end
                     end
@@ -836,13 +953,13 @@ module mac_fsm_80211b #(
 
                 S_PSDU_BARKER: begin
                     if (symbol_end) begin
-                        if ((!rate_q && byte_cnt == payload_len_q - 16'd1 && bit_in_byte == 3'd7) ||
-                            ( rate_q && byte_cnt == payload_len_q - 16'd1 && bit_in_byte == 3'd6))
+                        if ((!rate_mode_q[0] && byte_cnt == payload_len_q - 16'd1 && bit_in_byte == 3'd7) ||
+                            ( rate_mode_q[0] && byte_cnt == payload_len_q - 16'd1 && bit_in_byte == 3'd6))
                             sym_cnt <= 8'd0;
                         else
                             sym_cnt <= sym_cnt + 8'd1;
 
-                        if (!rate_q) begin
+                        if (!rate_mode_q[0]) begin
                             byte_sr     <= {1'b0, byte_sr[7:1]};
                             bit_in_byte <= bit_in_byte + 3'd1;
                             if (bit_in_byte == 3'd7) begin
@@ -879,12 +996,38 @@ module mac_fsm_80211b #(
                 S_FCS_BARKER: begin
                     if (symbol_end) begin
                         sym_cnt <= sym_cnt + 8'd1;
-                        if (!rate_q) begin
+                        if (!rate_mode_q[0]) begin
                             if (sym_cnt == 8'd0) fcs_sr <= {1'b0, fcs_out[31:1]};
                             else                 fcs_sr <= {1'b0, fcs_sr[31:1]};
                         end else begin
                             if (sym_cnt == 8'd0) fcs_sr <= {2'b00, fcs_out[31:2]};
                             else                 fcs_sr <= {2'b00, fcs_sr[31:2]};
+                        end
+                    end
+                end
+
+                S_PSDU_CCK: begin
+                    // Concurrent prefetch: while chips 0..3 of the CURRENT
+                    // symbol emit, pull bytes 0..3 of the NEXT symbol from
+                    // the FIFO.  Skip on the final symbol.
+                    if (cck_sym_cnt < cck_sym_count_q - 16'd1 && chip_cnt <= 4'd3) begin
+                        if (!fifo_empty) begin
+                            case (chip_cnt[1:0])
+                                2'd0: cck_word_next[7:0]   <= fifo_rd_data;
+                                2'd1: cck_word_next[15:8]  <= fifo_rd_data;
+                                2'd2: cck_word_next[23:16] <= fifo_rd_data;
+                                2'd3: cck_word_next[31:24] <= fifo_rd_data;
+                            endcase
+                            fifo_rd_en <= 1'b1;
+                        end else begin
+                            underrun_flag <= 1'b1;
+                        end
+                    end
+
+                    if (symbol_end) begin
+                        if (cck_sym_cnt < cck_sym_count_q - 16'd1) begin
+                            cck_word_curr <= cck_word_next;
+                            cck_sym_cnt   <= cck_sym_cnt + 16'd1;
                         end
                     end
                 end
@@ -903,33 +1046,44 @@ endmodule
 
 
 // =============================================================================
-// multi_mode_tx_baseband : cut-down 802.11b backscatter TX baseband.
+// multi_mode_tx_baseband : 802.11b backscatter TX baseband.
 //
-// This revision intentionally removes all non-Wi-Fi and high-rate 802.11b
-// features to reduce synthesized area while preserving commercial-receiver
-// compatibility for the two most robust compliant modes:
+// Supported PSDU rates (all on chip_i / chip_q at 11 Mchip/s):
+//   mod_config = 4'b0000 : 1   Mbps DBPSK + 11-chip Barker (chip computes)
+//   mod_config = 4'b0001 : 2   Mbps DQPSK + 11-chip Barker (chip computes)
+//   mod_config = 4'b0010 : 5.5 Mbps CCK   (MCU pre-computes; chip streams)
+//   mod_config = 4'b0011 : 11  Mbps CCK   (MCU pre-computes; chip streams)
 //
-//   mod_config = 4'b0000 : 1 Mbps  DBPSK + 11-chip Barker
-//   mod_config = 4'b0001 : 2 Mbps  DQPSK + 11-chip Barker
+// All other mod_config values are illegal, refused at start, and latched
+// into invalid_mode.
 //
-// All other `mod_config` values are illegal, refused at start, and latched
-// into `invalid_mode`.
+// MCU offload contract for CCK:
+//   For mod_config = 4'b001x the MCU is responsible for self-synchronous
+//   scrambling, CRC-32, 8-chip CCK encoding (incl. odd-symbol +pi and
+//   chip-3/chip-6 hardwired +pi), the LENGTH and SERVICE field values, and
+//   the cck_symbol_count for the PLCP PSDU+FCS region.  See
+//   rtl/path_a/mac_fsm_80211b.v header for the per-symbol packing format
+//   on the FIFO write port.
 //
-// Interface compatibility notes:
-//   * `clk_custom`, `length_us`, `symbol_out`, and `symbol_valid` are retained
-//     as ports so existing integration wrappers do not need a pinout change.
-//     They are deprecated and unused in this Wi-Fi-only cut.
-//   * Path B custom QAM, CCK, and the clock mux are removed from the RTL.
-//   * The FIFO read side is now always `clk_b_chip`.
+// Interface notes:
+//   * length_field replaces the previously-deprecated length_us port and is
+//     used at every rate (Barker rates set it to LENGTH = 8 * N_octets for
+//     1 Mbps or 4 * N_octets for 2 Mbps).
+//   * service_field is a per-packet 8-bit input, replacing the old
+//     compile-time SERVICE_FIELD_A parameter.  This lets the MCU set
+//     LENGTH_EXTENSION (bit 7) and LOCKED_CLOCKS (bit 2) per packet.
+//   * cck_symbol_count is read only by CCK rates; it is ignored otherwise.
+//   * clk_custom, symbol_out, and symbol_valid are still retained as ports
+//     for wrapper-pinout stability and remain unused.
+//   * The FIFO read side is always clk_b_chip.
 // =============================================================================
 module multi_mode_tx_baseband #(
     parameter integer PREAMBLE_SYNC_LEN_A = 128,
     parameter [15:0]  SFD_PATTERN_A       = 16'hF3A0,
-    parameter [7:0]   SERVICE_FIELD_A     = 8'h00,
     parameter [6:0]   SCRAMBLER_SEED_A    = 7'h6D,
     parameter [10:0]  BARKER_PATTERN      = 11'b10110111000,
-    parameter integer FIFO_DEPTH          = 8,
-    parameter integer FIFO_ADDR_W         = 3
+    parameter integer FIFO_DEPTH          = 16,
+    parameter integer FIFO_ADDR_W         = 4
 ) (
     input  wire        clk_b_chip,
     input  wire        clk_custom,
@@ -939,7 +1093,9 @@ module multi_mode_tx_baseband #(
     input  wire        tx_enable,
     input  wire [3:0]  mod_config,
     input  wire [15:0] payload_len,
-    input  wire [15:0] length_us,
+    input  wire [15:0] length_field,
+    input  wire [7:0]  service_field,
+    input  wire [15:0] cck_symbol_count,
 
     input  wire [7:0]  payload_in,
     input  wire        payload_write,
@@ -968,14 +1124,14 @@ module multi_mode_tx_baseband #(
 
     // =======================================================================
     // Mode decode
-    //   Only 0000 and 0001 remain legal.
+    //   Legal: 0000, 0001, 0010, 0011.
     // =======================================================================
     reg mod_valid_c;
     always @(*) begin
-        mod_valid_c = (mod_config == 4'b0000) || (mod_config == 4'b0001);
+        mod_valid_c = (mod_config[3:2] == 2'b00);
     end
-    wire mod_valid   = mod_valid_c;
-    wire path_a_rate = mod_config[0];  // 0=DBPSK, 1=DQPSK
+    wire       mod_valid = mod_valid_c;
+    wire [1:0] rate_mode = mod_config[1:0];
 
     // =======================================================================
     // tx_enable edge detect in clk_mcu
@@ -1026,7 +1182,7 @@ module multi_mode_tx_baseband #(
     );
 
     // =======================================================================
-    // Path A only: 802.11b 1/2 Mbps Long PLCP + rotator
+    // Path A only: 802.11b 1/2/5.5/11 Mbps Long PLCP + rotator
     // =======================================================================
     wire       a_fifo_rd_en;
     wire       a_busy;
@@ -1043,25 +1199,27 @@ module multi_mode_tx_baseband #(
     mac_fsm_80211b #(
         .PREAMBLE_SYNC_LEN(PREAMBLE_SYNC_LEN_A),
         .SFD_PATTERN     (SFD_PATTERN_A),
-        .SERVICE_FIELD   (SERVICE_FIELD_A),
         .SCRAMBLER_SEED  (SCRAMBLER_SEED_A),
         .BARKER_PATTERN  (BARKER_PATTERN)
     ) u_mac_a (
-        .clk          (clk_b_chip),
-        .rst_n        (rst_n_b_chip_s),
-        .start_pulse  (start_pulse_a),
-        .rate         (path_a_rate),
-        .payload_len  (payload_len),
-        .busy         (a_busy),
-        .done_pulse   (a_done),
-        .fifo_rd_en   (a_fifo_rd_en),
-        .fifo_empty   (fifo_empty),
-        .fifo_rd_data (fifo_rd_data),
-        .underrun_flag(a_underrun),
-        .base_phase   (a_base_phase),
-        .delta_phi1   (a_delta_phi1),
-        .update_phi1  (a_update_phi1),
-        .chip_valid   (a_chip_valid_to_phy)
+        .clk             (clk_b_chip),
+        .rst_n           (rst_n_b_chip_s),
+        .start_pulse     (start_pulse_a),
+        .rate_mode       (rate_mode),
+        .payload_len     (payload_len),
+        .length_field    (length_field),
+        .service_field   (service_field),
+        .cck_symbol_count(cck_symbol_count),
+        .busy            (a_busy),
+        .done_pulse      (a_done),
+        .fifo_rd_en      (a_fifo_rd_en),
+        .fifo_empty      (fifo_empty),
+        .fifo_rd_data    (fifo_rd_data),
+        .underrun_flag   (a_underrun),
+        .base_phase      (a_base_phase),
+        .delta_phi1      (a_delta_phi1),
+        .update_phi1     (a_update_phi1),
+        .chip_valid      (a_chip_valid_to_phy)
     );
 
     phy_a_rotator u_phy_a (
@@ -1140,4 +1298,3 @@ module multi_mode_tx_baseband #(
 `endif
 
 endmodule
-

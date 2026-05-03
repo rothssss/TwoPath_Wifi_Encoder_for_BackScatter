@@ -1,15 +1,15 @@
 // =============================================================================
 // tb_top_flat : end-to-end smoke test of the flattened top module.
 //
-// This is a trimmed version of tb_multi_mode_tx_baseband.sv aimed at
-// confirming that the flattened single-file RTL compiles and functions at
-// the top level.  It exercises:
+// Trimmed parallel of tb_multi_mode_tx_baseband.sv aimed at confirming that
+// the flattened single-file RTL compiles and functions at the top level.
+// Exercises:
 //
-//   T_A1  1 Mbps DBPSK   (Path A)                expected 2640 chip pulses
-//   T_B1  QPSK           (Path B, 2 bits/sym)    expected (32 + 8*4 + 32)/2 = 48 syms
-//   T_C1  Illegal mode   (Path A mod_config 111) -> invalid_mode latched
+//   T_A1  1   Mbps DBPSK   (mod_config = 4'b0000)
+//   T_A2  11  Mbps CCK     (mod_config = 4'b0011, MCU offload stub)
+//   T_C1  illegal mod_config (4'b0111)  -> invalid_mode latched
 //
-// Pass/fail on each check; final tally printed.
+// Pass/fail per check; final tally printed.
 // =============================================================================
 `timescale 1ns/1ps
 
@@ -17,7 +17,7 @@ module tb_top_flat;
 
     // Clocks
     localparam real T_BCHIP  = 90.9;   // 11 MHz
-    localparam real T_CUSTOM = 10.0;   // 100 MHz
+    localparam real T_CUSTOM = 10.0;   // 100 MHz (deprecated, port still present)
     localparam real T_MCU    = 20.0;   // 50 MHz
 
     reg clk_b_chip = 1'b0;
@@ -29,12 +29,14 @@ module tb_top_flat;
     always #(T_CUSTOM / 2.0) clk_custom = ~clk_custom;
     always #(T_MCU    / 2.0) clk_mcu    = ~clk_mcu;
 
-    reg         tx_enable     = 1'b0;
-    reg  [3:0]  mod_config    = 4'd0;
-    reg  [15:0] payload_len   = 16'd0;
-    reg  [15:0] length_us     = 16'd0;
-    reg  [7:0]  payload_in    = 8'd0;
-    reg         payload_write = 1'b0;
+    reg         tx_enable        = 1'b0;
+    reg  [3:0]  mod_config       = 4'd0;
+    reg  [15:0] payload_len      = 16'd0;
+    reg  [15:0] length_field     = 16'd0;
+    reg  [7:0]  service_field    = 8'd0;
+    reg  [15:0] cck_symbol_count = 16'd0;
+    reg  [7:0]  payload_in       = 8'd0;
+    reg         payload_write    = 1'b0;
 
     wire        tx_busy;
     wire        fifo_full;
@@ -51,7 +53,10 @@ module tb_top_flat;
         .clk_b_chip(clk_b_chip), .clk_custom(clk_custom), .clk_mcu(clk_mcu),
         .rst_n(rst_n),
         .tx_enable(tx_enable), .mod_config(mod_config),
-        .payload_len(payload_len), .length_us(length_us),
+        .payload_len(payload_len),
+        .length_field(length_field),
+        .service_field(service_field),
+        .cck_symbol_count(cck_symbol_count),
         .payload_in(payload_in), .payload_write(payload_write),
         .tx_busy(tx_busy), .fifo_full(fifo_full), .underrun(underrun),
         .invalid_mode(invalid_mode), .tx_done(tx_done),
@@ -109,13 +114,15 @@ module tb_top_flat;
 
     task automatic do_reset;
         begin
-            rst_n         = 1'b0;
-            tx_enable     = 1'b0;
-            mod_config    = 4'd0;
-            payload_len   = 16'd0;
-            length_us     = 16'd0;
-            payload_in    = 8'd0;
-            payload_write = 1'b0;
+            rst_n            = 1'b0;
+            tx_enable        = 1'b0;
+            mod_config       = 4'd0;
+            payload_len      = 16'd0;
+            length_field     = 16'd0;
+            service_field    = 8'd0;
+            cck_symbol_count = 16'd0;
+            payload_in       = 8'd0;
+            payload_write    = 1'b0;
             #(T_BCHIP * 5);
             rst_n = 1'b1;
             #(T_BCHIP * 5);
@@ -141,12 +148,31 @@ module tb_top_flat;
         end
     endtask
 
-    task automatic configure(input [3:0] mc, input [15:0] plen, input [15:0] lus);
+    task automatic configure_barker(input [3:0] mc, input [15:0] plen);
+        integer lf;
+        begin
+            lf = (mc[1:0] == 2'b00) ? (plen << 3) :
+                 (mc[1:0] == 2'b01) ? (plen << 2) : 0;
+            @(posedge clk_mcu); #1;
+            mod_config       = mc;
+            payload_len      = plen;
+            length_field     = lf[15:0];
+            service_field    = 8'h00;
+            cck_symbol_count = 16'd0;
+        end
+    endtask
+
+    task automatic configure_cck(input [3:0]  mc,
+                                 input [15:0] sym_count,
+                                 input [15:0] length_us_in,
+                                 input [7:0]  service_in);
         begin
             @(posedge clk_mcu); #1;
-            mod_config  = mc;
-            payload_len = plen;
-            length_us   = lus;
+            mod_config       = mc;
+            payload_len      = 16'd0;
+            length_field     = length_us_in;
+            service_field    = service_in;
+            cck_symbol_count = sym_count;
         end
     endtask
 
@@ -193,37 +219,36 @@ module tb_top_flat;
         // ---- T_A1 1 Mbps DBPSK, payload_len = 4 ----
         $display("\n--- T_A1 DBPSK 1 Mbps, payload=4 ---");
         do_reset();
-        configure(4'b0000, 16'd4, 16'd0);
+        configure_barker(4'b0000, 16'd4);
         write_bytes(4, 8'hA0);
         snap_counters();
         pulse_tx_enable();
         wait_done(3_000_000, done);
         chk    ("T_A1 tx_done pulsed", done);
         chk_eq ("T_A1 chip_valid count",  chip_valid_cnt   - snap_chip,
-                2112 + (8*4+32)*11);        // 2816
+                2112 + (8*4+32)*11);
         chk_eq ("T_A1 symbol_valid silent", symbol_valid_cnt - snap_sym, 0);
         chk_eq ("T_A1 no underrun",       underrun_cnt - snap_ur, 0);
         chk    ("T_A1 invalid_mode clear", !invalid_mode);
 
-        // ---- T_B1 QPSK, payload_len = 4 ----
-        $display("\n--- T_B1 QPSK, payload=4 ---");
+        // ---- T_A2 11 Mbps CCK stub, 2 symbols (8 FIFO bytes) ----
+        $display("\n--- T_A2 CCK 11 Mbps stub, 2 symbols ---");
         do_reset();
-        configure(4'b1001, 16'd4, 16'd0);
-        write_bytes(4, 8'hB0);
+        configure_cck(4'b0011, 16'd2, 16'd2, 8'h00);
+        write_bytes(8, 8'h00);  // 4 bytes * 2 symbols, all-zero stub
         snap_counters();
         pulse_tx_enable();
-        wait_done(200_000, done);
-        chk    ("T_B1 tx_done pulsed", done);
-        // total bits = preamble(32) + payload(32) + fcs(32) = 96.  96/2 = 48 syms.
-        chk_eq ("T_B1 symbol_valid count", symbol_valid_cnt - snap_sym, 48);
-        chk_eq ("T_B1 chip_valid silent",  chip_valid_cnt   - snap_chip, 0);
-        chk_eq ("T_B1 no underrun",        underrun_cnt     - snap_ur,   0);
-        chk    ("T_B1 invalid_mode clear", !invalid_mode);
+        wait_done(3_000_000, done);
+        chk    ("T_A2 tx_done pulsed", done);
+        chk_eq ("T_A2 chip_valid count", chip_valid_cnt - snap_chip,
+                2112 + 2*8);
+        chk_eq ("T_A2 no underrun",      underrun_cnt - snap_ur, 0);
+        chk    ("T_A2 invalid_mode clear", !invalid_mode);
 
         // ---- T_C1 illegal mod_config 0111 ----
         $display("\n--- T_C1 illegal mod_config ---");
         do_reset();
-        configure(4'b0111, 16'd4, 16'd0);
+        configure_barker(4'b0111, 16'd4);
         snap_counters();
         pulse_tx_enable();
         #(T_MCU * 10);

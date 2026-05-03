@@ -11,11 +11,10 @@
 module multi_mode_tx_baseband #(
 parameter integer PREAMBLE_SYNC_LEN_A = 128,
     parameter [15:0]  SFD_PATTERN_A       = 16'hF3A0,
-    parameter [7:0]   SERVICE_FIELD_A     = 8'h00,
     parameter [6:0]   SCRAMBLER_SEED_A    = 7'h6D,
     parameter [10:0]  BARKER_PATTERN      = 11'b10110111000,
-    parameter integer FIFO_DEPTH          = 8,
-    parameter integer FIFO_ADDR_W         = 3
+    parameter integer FIFO_DEPTH          = 16,
+    parameter integer FIFO_ADDR_W         = 4
 ) (
 input  wire        clk_b_chip,
     input  wire        clk_custom,
@@ -25,7 +24,9 @@ input  wire        clk_b_chip,
     input  wire        tx_enable,
     input  wire [3:0]  mod_config,
     input  wire [15:0] payload_len,
-    input  wire [15:0] length_us,
+    input  wire [15:0] length_field,
+    input  wire [7:0]  service_field,
+    input  wire [15:0] cck_symbol_count,
 
     input  wire [7:0]  payload_in,
     input  wire        payload_write,
@@ -44,9 +45,15 @@ input  wire        clk_b_chip,
 );
 
 function [7:0] multi_mode_tx_baseband__u_mac_a__signal_byte_for_rate;
-        input r;
+        input [1:0] r;
         begin
-            multi_mode_tx_baseband__u_mac_a__signal_byte_for_rate = r ? 8'h14 : 8'h0A;
+            case (r)
+                2'b00:   multi_mode_tx_baseband__u_mac_a__signal_byte_for_rate = 8'h0A; // 1   Mbps
+                2'b01:   multi_mode_tx_baseband__u_mac_a__signal_byte_for_rate = 8'h14; // 2   Mbps
+                2'b10:   multi_mode_tx_baseband__u_mac_a__signal_byte_for_rate = 8'h37; // 5.5 Mbps
+                2'b11:   multi_mode_tx_baseband__u_mac_a__signal_byte_for_rate = 8'h6E; // 11  Mbps
+                default: multi_mode_tx_baseband__u_mac_a__signal_byte_for_rate = 8'h0A;
+            endcase
         end
     endfunction
 
@@ -112,16 +119,17 @@ reg multi_mode_tx_baseband__u_rs_bchip__meta_q;
     end
 
     assign rst_n_b_chip_s = multi_mode_tx_baseband__u_rs_bchip__sync_q;
+
     // =======================================================================
     // Mode decode
-    //   Only 0000 and 0001 remain legal.
+    //   Legal: 0000, 0001, 0010, 0011.
     // =======================================================================
     reg mod_valid_c;
     always @(*) begin
-        mod_valid_c = (mod_config == 4'b0000) || (mod_config == 4'b0001);
+        mod_valid_c = (mod_config[3:2] == 2'b00);
     end
-    wire mod_valid   = mod_valid_c;
-    wire path_a_rate = mod_config[0];  // 0=DBPSK, 1=DQPSK
+    wire       mod_valid = mod_valid_c;
+    wire [1:0] rate_mode = mod_config[1:0];
 
     // =======================================================================
     // tx_enable edge detect in clk_mcu
@@ -171,6 +179,7 @@ reg [1-1:0] multi_mode_tx_baseband__u_ps_a__u_sync__meta_q;
     end
 
     assign multi_mode_tx_baseband__u_ps_a__toggle_dst = multi_mode_tx_baseband__u_ps_a__u_sync__sync_q;
+
     reg multi_mode_tx_baseband__u_ps_a__toggle_dst_q;
     always @(posedge clk_b_chip or negedge rst_n_b_chip_s) begin
         if (!rst_n_b_chip_s) multi_mode_tx_baseband__u_ps_a__toggle_dst_q <= 1'b0;
@@ -178,6 +187,7 @@ reg [1-1:0] multi_mode_tx_baseband__u_ps_a__u_sync__meta_q;
     end
 
     assign start_pulse_a = multi_mode_tx_baseband__u_ps_a__toggle_dst ^ multi_mode_tx_baseband__u_ps_a__toggle_dst_q;
+
     // =======================================================================
     // Async FIFO (MCU -> clk_b_chip only)
     // =======================================================================
@@ -238,6 +248,7 @@ reg [FIFO_ADDR_W+1-1:0] multi_mode_tx_baseband__u_fifo__u_sync_r2w__meta_q;
     end
 
     assign multi_mode_tx_baseband__u_fifo__rptr_gray_at_w = multi_mode_tx_baseband__u_fifo__u_sync_r2w__sync_q;
+
     // Full when multi_mode_tx_baseband__u_fifo__wptr_gray equals read-pointer-gray with the upper two bits
     // inverted (classic Cummings async-FIFO formulation).
     assign fifo_full = (multi_mode_tx_baseband__u_fifo__wptr_gray == {~multi_mode_tx_baseband__u_fifo__rptr_gray_at_w[FIFO_ADDR_W:FIFO_ADDR_W-1],
@@ -272,13 +283,15 @@ reg [FIFO_ADDR_W+1-1:0] multi_mode_tx_baseband__u_fifo__u_sync_w2r__meta_q;
     end
 
     assign multi_mode_tx_baseband__u_fifo__wptr_gray_at_r = multi_mode_tx_baseband__u_fifo__u_sync_w2r__sync_q;
+
     assign fifo_empty = (multi_mode_tx_baseband__u_fifo__rptr_gray == multi_mode_tx_baseband__u_fifo__wptr_gray_at_r);
 
     // Read data is combinational from memory at the current read address.
     // Downstream should register it if synchronous read is desired.
     assign fifo_rd_data = multi_mode_tx_baseband__u_fifo__mem[multi_mode_tx_baseband__u_fifo__rptr_bin[FIFO_ADDR_W-1:0]];
+
     // =======================================================================
-    // Path A only: 802.11b 1/2 Mbps Long PLCP + rotator
+    // Path A only: 802.11b 1/2/5.5/11 Mbps Long PLCP + rotator
     // =======================================================================
     reg         a_fifo_rd_en;
     reg         a_busy;
@@ -294,26 +307,31 @@ reg [FIFO_ADDR_W+1-1:0] multi_mode_tx_baseband__u_fifo__u_sync_w2r__meta_q;
 // ---------------------------------------------------------------------------
 // Inlined mac_fsm_80211b instance: multi_mode_tx_baseband__u_mac_a
 // ---------------------------------------------------------------------------
-localparam [2:0]
-        multi_mode_tx_baseband__u_mac_a__S_IDLE        = 3'd0,
-        multi_mode_tx_baseband__u_mac_a__S_SYNC        = 3'd1,
-        multi_mode_tx_baseband__u_mac_a__S_SFD         = 3'd2,
-        multi_mode_tx_baseband__u_mac_a__S_HEAD        = 3'd3,
-        multi_mode_tx_baseband__u_mac_a__S_HEC         = 3'd4,
-        multi_mode_tx_baseband__u_mac_a__S_PSDU_BARKER = 3'd5,
-        multi_mode_tx_baseband__u_mac_a__S_FCS_BARKER  = 3'd6,
-        multi_mode_tx_baseband__u_mac_a__S_DONE        = 3'd7;
+localparam [3:0]
+        multi_mode_tx_baseband__u_mac_a__S_IDLE        = 4'd0,
+        multi_mode_tx_baseband__u_mac_a__S_SYNC        = 4'd1,
+        multi_mode_tx_baseband__u_mac_a__S_SFD         = 4'd2,
+        multi_mode_tx_baseband__u_mac_a__S_HEAD        = 4'd3,
+        multi_mode_tx_baseband__u_mac_a__S_HEC         = 4'd4,
+        multi_mode_tx_baseband__u_mac_a__S_PSDU_BARKER = 4'd5,
+        multi_mode_tx_baseband__u_mac_a__S_FCS_BARKER  = 4'd6,
+        multi_mode_tx_baseband__u_mac_a__S_PSDU_CCK    = 4'd7,
+        multi_mode_tx_baseband__u_mac_a__S_DONE        = 4'd8;
 
-    reg [2:0] multi_mode_tx_baseband__u_mac_a__state, multi_mode_tx_baseband__u_mac_a__state_next;
-    reg       multi_mode_tx_baseband__u_mac_a__rate_q;
+    reg [3:0] multi_mode_tx_baseband__u_mac_a__state, multi_mode_tx_baseband__u_mac_a__state_next;
+    reg [1:0] multi_mode_tx_baseband__u_mac_a__rate_mode_q;
+    wire      multi_mode_tx_baseband__u_mac_a__cck_active = multi_mode_tx_baseband__u_mac_a__rate_mode_q[1];
 
     reg  [3:0] multi_mode_tx_baseband__u_mac_a__chip_cnt;
+    wire [3:0] multi_mode_tx_baseband__u_mac_a__chip_max     = (multi_mode_tx_baseband__u_mac_a__state == multi_mode_tx_baseband__u_mac_a__S_PSDU_CCK) ? 4'd7 : 4'd10;
     wire       multi_mode_tx_baseband__u_mac_a__symbol_start = (multi_mode_tx_baseband__u_mac_a__chip_cnt == 4'd0);
-    wire       multi_mode_tx_baseband__u_mac_a__symbol_end   = (multi_mode_tx_baseband__u_mac_a__chip_cnt == 4'd10);
+    wire       multi_mode_tx_baseband__u_mac_a__symbol_end   = (multi_mode_tx_baseband__u_mac_a__chip_cnt == multi_mode_tx_baseband__u_mac_a__chip_max);
 
     reg  [15:0] multi_mode_tx_baseband__u_mac_a__payload_len_q;
+    reg  [15:0] multi_mode_tx_baseband__u_mac_a__cck_sym_count_q;
     reg  [7:0]  multi_mode_tx_baseband__u_mac_a__sym_cnt;
     reg  [15:0] multi_mode_tx_baseband__u_mac_a__byte_cnt;
+    reg  [15:0] multi_mode_tx_baseband__u_mac_a__cck_sym_cnt;
     reg  [2:0]  multi_mode_tx_baseband__u_mac_a__bit_in_byte;
 
     reg  [7:0]  multi_mode_tx_baseband__u_mac_a__byte_sr;
@@ -321,6 +339,12 @@ localparam [2:0]
     reg  [15:0] multi_mode_tx_baseband__u_mac_a__sfd_sr;
     reg  [15:0] multi_mode_tx_baseband__u_mac_a__hec_sr;
     reg  [31:0] multi_mode_tx_baseband__u_mac_a__fcs_sr;
+
+    // CCK symbol streamer: multi_mode_tx_baseband__u_mac_a__cck_word_curr feeds the 8 chips of the symbol
+    // currently emitting; multi_mode_tx_baseband__u_mac_a__cck_word_next buffers the next symbol's 4 bytes
+    // while the current symbol is still on the wire.
+    reg  [31:0] multi_mode_tx_baseband__u_mac_a__cck_word_curr;
+    reg  [31:0] multi_mode_tx_baseband__u_mac_a__cck_word_next;
 
     reg         multi_mode_tx_baseband__u_mac_a__crc_init;
 
@@ -373,7 +397,7 @@ localparam [2:0]
                 multi_mode_tx_baseband__u_mac_a__raw_bit_c     = multi_mode_tx_baseband__u_mac_a__byte_sr[0];
                 multi_mode_tx_baseband__u_mac_a__raw_bit2_c    = multi_mode_tx_baseband__u_mac_a__byte_sr[1];
                 multi_mode_tx_baseband__u_mac_a__scramble_c    = 1'b1;
-                multi_mode_tx_baseband__u_mac_a__two_bit_sym_c = multi_mode_tx_baseband__u_mac_a__rate_q;
+                multi_mode_tx_baseband__u_mac_a__two_bit_sym_c = multi_mode_tx_baseband__u_mac_a__rate_mode_q[0];
                 multi_mode_tx_baseband__u_mac_a__feed_fcs_c    = 1'b1;
                 multi_mode_tx_baseband__u_mac_a__emit_chip_c   = 1'b1;
             end
@@ -381,7 +405,12 @@ localparam [2:0]
                 multi_mode_tx_baseband__u_mac_a__raw_bit_c     = multi_mode_tx_baseband__u_mac_a__fcs_source[0];
                 multi_mode_tx_baseband__u_mac_a__raw_bit2_c    = multi_mode_tx_baseband__u_mac_a__fcs_source[1];
                 multi_mode_tx_baseband__u_mac_a__scramble_c    = 1'b1;
-                multi_mode_tx_baseband__u_mac_a__two_bit_sym_c = multi_mode_tx_baseband__u_mac_a__rate_q;
+                multi_mode_tx_baseband__u_mac_a__two_bit_sym_c = multi_mode_tx_baseband__u_mac_a__rate_mode_q[0];
+                multi_mode_tx_baseband__u_mac_a__emit_chip_c   = 1'b1;
+            end
+            multi_mode_tx_baseband__u_mac_a__S_PSDU_CCK: begin
+                // Chip pattern is replayed straight from multi_mode_tx_baseband__u_mac_a__cck_word_curr; no
+                // chip-side scrambler / Barker / CRC engagement.
                 multi_mode_tx_baseband__u_mac_a__emit_chip_c   = 1'b1;
             end
             default: ;
@@ -389,7 +418,7 @@ localparam [2:0]
     end
 
     // ------------------------------------------------------------------
-    // Self-synchronous scrambler
+    // Self-synchronous scrambler (Barker rates only)
     // ------------------------------------------------------------------
     reg  [6:0] multi_mode_tx_baseband__u_mac_a__lfsr;
 function [6:0] multi_mode_tx_baseband__u_mac_a__scramble_state_ss;
@@ -409,8 +438,25 @@ function [6:0] multi_mode_tx_baseband__u_mac_a__scramble_state_ss;
 wire [1:0] multi_mode_tx_baseband__u_mac_a__delta_phi1_barker =
         multi_mode_tx_baseband__u_mac_a__two_bit_sym_c ? multi_mode_tx_baseband__u_mac_a__dqpsk_delta_from_bits(multi_mode_tx_baseband__u_mac_a__s0, multi_mode_tx_baseband__u_mac_a__s1) : {multi_mode_tx_baseband__u_mac_a__s0, 1'b0};
 
-    wire multi_mode_tx_baseband__u_mac_a__barker_chip_bit = BARKER_PATTERN[10 - multi_mode_tx_baseband__u_mac_a__chip_cnt[3:0]];
+    wire multi_mode_tx_baseband__u_mac_a__barker_chip_bit       = BARKER_PATTERN[10 - multi_mode_tx_baseband__u_mac_a__chip_cnt[3:0]];
     wire [1:0] multi_mode_tx_baseband__u_mac_a__base_phase_barker = multi_mode_tx_baseband__u_mac_a__barker_chip_bit ? 2'b00 : 2'b10;
+
+    // CCK chip-phase mux: select c_k for the current chip from multi_mode_tx_baseband__u_mac_a__cck_word_curr.
+    reg [1:0] multi_mode_tx_baseband__u_mac_a__cck_chip_phase;
+    always @(*) begin
+        case (multi_mode_tx_baseband__u_mac_a__chip_cnt[2:0])
+            3'd0:   multi_mode_tx_baseband__u_mac_a__cck_chip_phase = multi_mode_tx_baseband__u_mac_a__cck_word_curr[3:2];
+            3'd1:   multi_mode_tx_baseband__u_mac_a__cck_chip_phase = multi_mode_tx_baseband__u_mac_a__cck_word_curr[5:4];
+            3'd2:   multi_mode_tx_baseband__u_mac_a__cck_chip_phase = multi_mode_tx_baseband__u_mac_a__cck_word_curr[7:6];
+            3'd3:   multi_mode_tx_baseband__u_mac_a__cck_chip_phase = multi_mode_tx_baseband__u_mac_a__cck_word_curr[9:8];
+            3'd4:   multi_mode_tx_baseband__u_mac_a__cck_chip_phase = multi_mode_tx_baseband__u_mac_a__cck_word_curr[11:10];
+            3'd5:   multi_mode_tx_baseband__u_mac_a__cck_chip_phase = multi_mode_tx_baseband__u_mac_a__cck_word_curr[13:12];
+            3'd6:   multi_mode_tx_baseband__u_mac_a__cck_chip_phase = multi_mode_tx_baseband__u_mac_a__cck_word_curr[15:14];
+            3'd7:   multi_mode_tx_baseband__u_mac_a__cck_chip_phase = multi_mode_tx_baseband__u_mac_a__cck_word_curr[17:16];
+            default:multi_mode_tx_baseband__u_mac_a__cck_chip_phase = 2'd0;
+        endcase
+    end
+    wire [1:0] multi_mode_tx_baseband__u_mac_a__cck_delta_phi1 = multi_mode_tx_baseband__u_mac_a__cck_word_curr[1:0];
 // ---------------------------------------------------------------------------
 // Inlined crc16_80211_hec instance: multi_mode_tx_baseband__u_mac_a__u_hec
 // ---------------------------------------------------------------------------
@@ -426,6 +472,7 @@ reg [15:0] multi_mode_tx_baseband__u_mac_a__u_hec__state;
     end
 
     assign multi_mode_tx_baseband__u_mac_a__hec_out = multi_mode_tx_baseband__u_mac_a__u_hec__state ^ 16'hFFFF;
+
     reg multi_mode_tx_baseband__u_mac_a__fcs_feed_second_cycle;
     always @(posedge clk_b_chip or negedge rst_n_b_chip_s) begin
         if (!rst_n_b_chip_s)                          multi_mode_tx_baseband__u_mac_a__fcs_feed_second_cycle <= 1'b0;
@@ -451,15 +498,13 @@ reg [31:0] multi_mode_tx_baseband__u_mac_a__u_fcs__state;
     end
 
     assign multi_mode_tx_baseband__u_mac_a__fcs_out = multi_mode_tx_baseband__u_mac_a__u_fcs__state ^ 32'hFFFFFFFF;
-    // LENGTH is cheap again for the retained rates:
-    //   1 Mbps -> 8 * payload_len us
-    //   2 Mbps -> 4 * payload_len us
-    wire [15:0] multi_mode_tx_baseband__u_mac_a__length_field_c = path_a_rate ? (payload_len << 2) : (payload_len << 3);
+
+    // Header is loaded from MCU-supplied LENGTH and SERVICE for all rates.
     wire [31:0] multi_mode_tx_baseband__u_mac_a__header_load = {
-        multi_mode_tx_baseband__u_mac_a__length_field_c[15:8],
-        multi_mode_tx_baseband__u_mac_a__length_field_c[7:0],
-        SERVICE_FIELD_A,
-        multi_mode_tx_baseband__u_mac_a__signal_byte_for_rate(path_a_rate)
+        length_field[15:8],
+        length_field[7:0],
+        service_field,
+        multi_mode_tx_baseband__u_mac_a__signal_byte_for_rate(rate_mode)
     };
 
     always @(*) begin
@@ -469,21 +514,30 @@ reg [31:0] multi_mode_tx_baseband__u_mac_a__u_fcs__state;
             multi_mode_tx_baseband__u_mac_a__S_SYNC       : if (multi_mode_tx_baseband__u_mac_a__symbol_end && multi_mode_tx_baseband__u_mac_a__sym_cnt == PREAMBLE_SYNC_LEN_A - 1) multi_mode_tx_baseband__u_mac_a__state_next = multi_mode_tx_baseband__u_mac_a__S_SFD;
             multi_mode_tx_baseband__u_mac_a__S_SFD        : if (multi_mode_tx_baseband__u_mac_a__symbol_end && multi_mode_tx_baseband__u_mac_a__sym_cnt == 8'd15)                 multi_mode_tx_baseband__u_mac_a__state_next = multi_mode_tx_baseband__u_mac_a__S_HEAD;
             multi_mode_tx_baseband__u_mac_a__S_HEAD       : if (multi_mode_tx_baseband__u_mac_a__symbol_end && multi_mode_tx_baseband__u_mac_a__sym_cnt == 8'd31)                 multi_mode_tx_baseband__u_mac_a__state_next = multi_mode_tx_baseband__u_mac_a__S_HEC;
-            multi_mode_tx_baseband__u_mac_a__S_HEC        : if (multi_mode_tx_baseband__u_mac_a__symbol_end && multi_mode_tx_baseband__u_mac_a__sym_cnt == 8'd15)
-                               multi_mode_tx_baseband__u_mac_a__state_next = (multi_mode_tx_baseband__u_mac_a__payload_len_q == 16'd0) ? multi_mode_tx_baseband__u_mac_a__S_FCS_BARKER : multi_mode_tx_baseband__u_mac_a__S_PSDU_BARKER;
+            multi_mode_tx_baseband__u_mac_a__S_HEC        : if (multi_mode_tx_baseband__u_mac_a__symbol_end && multi_mode_tx_baseband__u_mac_a__sym_cnt == 8'd15) begin
+                if (multi_mode_tx_baseband__u_mac_a__cck_active) begin
+                    multi_mode_tx_baseband__u_mac_a__state_next = (multi_mode_tx_baseband__u_mac_a__cck_sym_count_q == 16'd0) ? multi_mode_tx_baseband__u_mac_a__S_DONE : multi_mode_tx_baseband__u_mac_a__S_PSDU_CCK;
+                end else begin
+                    multi_mode_tx_baseband__u_mac_a__state_next = (multi_mode_tx_baseband__u_mac_a__payload_len_q == 16'd0) ? multi_mode_tx_baseband__u_mac_a__S_FCS_BARKER : multi_mode_tx_baseband__u_mac_a__S_PSDU_BARKER;
+                end
+            end
             multi_mode_tx_baseband__u_mac_a__S_PSDU_BARKER: begin
                 if (multi_mode_tx_baseband__u_mac_a__symbol_end && multi_mode_tx_baseband__u_mac_a__byte_cnt == multi_mode_tx_baseband__u_mac_a__payload_len_q - 16'd1) begin
-                    if ((!multi_mode_tx_baseband__u_mac_a__rate_q && multi_mode_tx_baseband__u_mac_a__bit_in_byte == 3'd7) ||
-                        ( multi_mode_tx_baseband__u_mac_a__rate_q && multi_mode_tx_baseband__u_mac_a__bit_in_byte == 3'd6))
+                    if ((!multi_mode_tx_baseband__u_mac_a__rate_mode_q[0] && multi_mode_tx_baseband__u_mac_a__bit_in_byte == 3'd7) ||
+                        ( multi_mode_tx_baseband__u_mac_a__rate_mode_q[0] && multi_mode_tx_baseband__u_mac_a__bit_in_byte == 3'd6))
                         multi_mode_tx_baseband__u_mac_a__state_next = multi_mode_tx_baseband__u_mac_a__S_FCS_BARKER;
                 end
             end
             multi_mode_tx_baseband__u_mac_a__S_FCS_BARKER : begin
                 if (multi_mode_tx_baseband__u_mac_a__symbol_end) begin
-                    if ((!multi_mode_tx_baseband__u_mac_a__rate_q && multi_mode_tx_baseband__u_mac_a__sym_cnt == 8'd31) ||
-                        ( multi_mode_tx_baseband__u_mac_a__rate_q && multi_mode_tx_baseband__u_mac_a__sym_cnt == 8'd15))
+                    if ((!multi_mode_tx_baseband__u_mac_a__rate_mode_q[0] && multi_mode_tx_baseband__u_mac_a__sym_cnt == 8'd31) ||
+                        ( multi_mode_tx_baseband__u_mac_a__rate_mode_q[0] && multi_mode_tx_baseband__u_mac_a__sym_cnt == 8'd15))
                         multi_mode_tx_baseband__u_mac_a__state_next = multi_mode_tx_baseband__u_mac_a__S_DONE;
                 end
+            end
+            multi_mode_tx_baseband__u_mac_a__S_PSDU_CCK   : begin
+                if (multi_mode_tx_baseband__u_mac_a__symbol_end && multi_mode_tx_baseband__u_mac_a__cck_sym_cnt == multi_mode_tx_baseband__u_mac_a__cck_sym_count_q - 16'd1)
+                    multi_mode_tx_baseband__u_mac_a__state_next = multi_mode_tx_baseband__u_mac_a__S_DONE;
             end
             multi_mode_tx_baseband__u_mac_a__S_DONE       : multi_mode_tx_baseband__u_mac_a__state_next = multi_mode_tx_baseband__u_mac_a__S_IDLE;
             default      : multi_mode_tx_baseband__u_mac_a__state_next = multi_mode_tx_baseband__u_mac_a__S_IDLE;
@@ -493,17 +547,21 @@ reg [31:0] multi_mode_tx_baseband__u_mac_a__u_fcs__state;
     always @(posedge clk_b_chip or negedge rst_n_b_chip_s) begin
         if (!rst_n_b_chip_s) begin
             multi_mode_tx_baseband__u_mac_a__state              <= multi_mode_tx_baseband__u_mac_a__S_IDLE;
-            multi_mode_tx_baseband__u_mac_a__rate_q             <= 1'b0;
+            multi_mode_tx_baseband__u_mac_a__rate_mode_q        <= 2'd0;
             multi_mode_tx_baseband__u_mac_a__chip_cnt           <= 4'd0;
             multi_mode_tx_baseband__u_mac_a__sym_cnt            <= 8'd0;
             multi_mode_tx_baseband__u_mac_a__byte_cnt           <= 16'd0;
+            multi_mode_tx_baseband__u_mac_a__cck_sym_cnt        <= 16'd0;
             multi_mode_tx_baseband__u_mac_a__bit_in_byte        <= 3'd0;
             multi_mode_tx_baseband__u_mac_a__payload_len_q      <= 16'd0;
+            multi_mode_tx_baseband__u_mac_a__cck_sym_count_q    <= 16'd0;
             multi_mode_tx_baseband__u_mac_a__byte_sr            <= 8'd0;
             multi_mode_tx_baseband__u_mac_a__header_sr          <= 32'd0;
             multi_mode_tx_baseband__u_mac_a__sfd_sr             <= 16'd0;
             multi_mode_tx_baseband__u_mac_a__hec_sr             <= 16'd0;
             multi_mode_tx_baseband__u_mac_a__fcs_sr             <= 32'd0;
+            multi_mode_tx_baseband__u_mac_a__cck_word_curr      <= 32'd0;
+            multi_mode_tx_baseband__u_mac_a__cck_word_next      <= 32'd0;
             multi_mode_tx_baseband__u_mac_a__lfsr               <= SCRAMBLER_SEED_A;
             multi_mode_tx_baseband__u_mac_a__crc_init           <= 1'b0;
             a_fifo_rd_en         <= 1'b0;
@@ -522,10 +580,11 @@ reg [31:0] multi_mode_tx_baseband__u_mac_a__u_fcs__state;
             a_update_phi1 <= 1'b0;
             a_chip_valid_to_phy  <= multi_mode_tx_baseband__u_mac_a__emit_chip_c;
 
-            a_base_phase <= multi_mode_tx_baseband__u_mac_a__base_phase_barker;
+            // Drive a_base_phase / a_delta_phi1 from the rate-appropriate source.
+            a_base_phase  <= (multi_mode_tx_baseband__u_mac_a__state == multi_mode_tx_baseband__u_mac_a__S_PSDU_CCK) ? multi_mode_tx_baseband__u_mac_a__cck_chip_phase : multi_mode_tx_baseband__u_mac_a__base_phase_barker;
             if (multi_mode_tx_baseband__u_mac_a__symbol_start && multi_mode_tx_baseband__u_mac_a__emit_chip_c) begin
                 a_update_phi1 <= 1'b1;
-                a_delta_phi1  <= multi_mode_tx_baseband__u_mac_a__delta_phi1_barker;
+                a_delta_phi1  <= (multi_mode_tx_baseband__u_mac_a__state == multi_mode_tx_baseband__u_mac_a__S_PSDU_CCK) ? multi_mode_tx_baseband__u_mac_a__cck_delta_phi1 : multi_mode_tx_baseband__u_mac_a__delta_phi1_barker;
             end
 
             if (multi_mode_tx_baseband__u_mac_a__symbol_start && multi_mode_tx_baseband__u_mac_a__scramble_c) begin
@@ -539,18 +598,22 @@ reg [31:0] multi_mode_tx_baseband__u_mac_a__u_fcs__state;
                 multi_mode_tx_baseband__u_mac_a__S_IDLE: begin
                     a_busy <= 1'b0;
                     if (start_pulse_a) begin
-                        multi_mode_tx_baseband__u_mac_a__rate_q        <= path_a_rate;
-                        multi_mode_tx_baseband__u_mac_a__payload_len_q <= payload_len;
-                        multi_mode_tx_baseband__u_mac_a__sym_cnt       <= 8'd0;
-                        multi_mode_tx_baseband__u_mac_a__byte_cnt      <= 16'd0;
-                        multi_mode_tx_baseband__u_mac_a__bit_in_byte   <= 3'd0;
-                        multi_mode_tx_baseband__u_mac_a__chip_cnt      <= 4'd0;
-                        multi_mode_tx_baseband__u_mac_a__sfd_sr        <= SFD_PATTERN_A;
-                        multi_mode_tx_baseband__u_mac_a__header_sr     <= multi_mode_tx_baseband__u_mac_a__header_load;
-                        multi_mode_tx_baseband__u_mac_a__lfsr          <= SCRAMBLER_SEED_A;
-                        multi_mode_tx_baseband__u_mac_a__crc_init      <= 1'b1;
-                        a_underrun <= 1'b0;
-                        a_busy          <= 1'b1;
+                        multi_mode_tx_baseband__u_mac_a__rate_mode_q     <= rate_mode;
+                        multi_mode_tx_baseband__u_mac_a__payload_len_q   <= payload_len;
+                        multi_mode_tx_baseband__u_mac_a__cck_sym_count_q <= cck_symbol_count;
+                        multi_mode_tx_baseband__u_mac_a__sym_cnt         <= 8'd0;
+                        multi_mode_tx_baseband__u_mac_a__byte_cnt        <= 16'd0;
+                        multi_mode_tx_baseband__u_mac_a__cck_sym_cnt     <= 16'd0;
+                        multi_mode_tx_baseband__u_mac_a__bit_in_byte     <= 3'd0;
+                        multi_mode_tx_baseband__u_mac_a__chip_cnt        <= 4'd0;
+                        multi_mode_tx_baseband__u_mac_a__sfd_sr          <= SFD_PATTERN_A;
+                        multi_mode_tx_baseband__u_mac_a__header_sr       <= multi_mode_tx_baseband__u_mac_a__header_load;
+                        multi_mode_tx_baseband__u_mac_a__cck_word_curr   <= 32'd0;
+                        multi_mode_tx_baseband__u_mac_a__cck_word_next   <= 32'd0;
+                        multi_mode_tx_baseband__u_mac_a__lfsr            <= SCRAMBLER_SEED_A;
+                        multi_mode_tx_baseband__u_mac_a__crc_init        <= 1'b1;
+                        a_underrun   <= 1'b0;
+                        a_busy            <= 1'b1;
                     end
                 end
 
@@ -575,17 +638,41 @@ reg [31:0] multi_mode_tx_baseband__u_mac_a__u_fcs__state;
                 end
 
                 multi_mode_tx_baseband__u_mac_a__S_HEC: begin
+                    // CCK preload: during the LAST HEC symbol's chips 4..7,
+                    // pull 4 bytes from the FIFO into multi_mode_tx_baseband__u_mac_a__cck_word_next so that
+                    // chip 0 of multi_mode_tx_baseband__u_mac_a__S_PSDU_CCK can emit with no bubble.
+                    if (multi_mode_tx_baseband__u_mac_a__cck_active && multi_mode_tx_baseband__u_mac_a__sym_cnt == 8'd15 &&
+                        multi_mode_tx_baseband__u_mac_a__chip_cnt >= 4'd4 && multi_mode_tx_baseband__u_mac_a__chip_cnt <= 4'd7 &&
+                        multi_mode_tx_baseband__u_mac_a__cck_sym_count_q != 16'd0) begin
+                        if (!fifo_empty) begin
+                            case (multi_mode_tx_baseband__u_mac_a__chip_cnt[1:0])
+                                2'd0: multi_mode_tx_baseband__u_mac_a__cck_word_next[7:0]   <= fifo_rd_data;
+                                2'd1: multi_mode_tx_baseband__u_mac_a__cck_word_next[15:8]  <= fifo_rd_data;
+                                2'd2: multi_mode_tx_baseband__u_mac_a__cck_word_next[23:16] <= fifo_rd_data;
+                                2'd3: multi_mode_tx_baseband__u_mac_a__cck_word_next[31:24] <= fifo_rd_data;
+                            endcase
+                            a_fifo_rd_en <= 1'b1;
+                        end else begin
+                            a_underrun <= 1'b1;
+                        end
+                    end
+
                     if (multi_mode_tx_baseband__u_mac_a__symbol_end) begin
                         if (multi_mode_tx_baseband__u_mac_a__sym_cnt == 8'd0) multi_mode_tx_baseband__u_mac_a__hec_sr <= {multi_mode_tx_baseband__u_mac_a__hec_out[14:0], 1'b0};
                         else                 multi_mode_tx_baseband__u_mac_a__hec_sr <= {multi_mode_tx_baseband__u_mac_a__hec_sr[14:0], 1'b0};
                         multi_mode_tx_baseband__u_mac_a__sym_cnt <= (multi_mode_tx_baseband__u_mac_a__sym_cnt == 8'd15) ? 8'd0 : multi_mode_tx_baseband__u_mac_a__sym_cnt + 8'd1;
 
-                        if (multi_mode_tx_baseband__u_mac_a__sym_cnt == 8'd15 && multi_mode_tx_baseband__u_mac_a__payload_len_q != 16'd0) begin
-                            if (!fifo_empty) begin
-                                multi_mode_tx_baseband__u_mac_a__byte_sr <= fifo_rd_data;
-                                if (multi_mode_tx_baseband__u_mac_a__payload_len_q > 16'd1) a_fifo_rd_en <= 1'b1;
-                            end else begin
-                                a_underrun <= 1'b1;
+                        if (multi_mode_tx_baseband__u_mac_a__sym_cnt == 8'd15) begin
+                            if (multi_mode_tx_baseband__u_mac_a__cck_active) begin
+                                multi_mode_tx_baseband__u_mac_a__cck_word_curr <= multi_mode_tx_baseband__u_mac_a__cck_word_next;
+                                multi_mode_tx_baseband__u_mac_a__cck_sym_cnt   <= 16'd0;
+                            end else if (multi_mode_tx_baseband__u_mac_a__payload_len_q != 16'd0) begin
+                                if (!fifo_empty) begin
+                                    multi_mode_tx_baseband__u_mac_a__byte_sr <= fifo_rd_data;
+                                    if (multi_mode_tx_baseband__u_mac_a__payload_len_q > 16'd1) a_fifo_rd_en <= 1'b1;
+                                end else begin
+                                    a_underrun <= 1'b1;
+                                end
                             end
                         end
                     end
@@ -593,13 +680,13 @@ reg [31:0] multi_mode_tx_baseband__u_mac_a__u_fcs__state;
 
                 multi_mode_tx_baseband__u_mac_a__S_PSDU_BARKER: begin
                     if (multi_mode_tx_baseband__u_mac_a__symbol_end) begin
-                        if ((!multi_mode_tx_baseband__u_mac_a__rate_q && multi_mode_tx_baseband__u_mac_a__byte_cnt == multi_mode_tx_baseband__u_mac_a__payload_len_q - 16'd1 && multi_mode_tx_baseband__u_mac_a__bit_in_byte == 3'd7) ||
-                            ( multi_mode_tx_baseband__u_mac_a__rate_q && multi_mode_tx_baseband__u_mac_a__byte_cnt == multi_mode_tx_baseband__u_mac_a__payload_len_q - 16'd1 && multi_mode_tx_baseband__u_mac_a__bit_in_byte == 3'd6))
+                        if ((!multi_mode_tx_baseband__u_mac_a__rate_mode_q[0] && multi_mode_tx_baseband__u_mac_a__byte_cnt == multi_mode_tx_baseband__u_mac_a__payload_len_q - 16'd1 && multi_mode_tx_baseband__u_mac_a__bit_in_byte == 3'd7) ||
+                            ( multi_mode_tx_baseband__u_mac_a__rate_mode_q[0] && multi_mode_tx_baseband__u_mac_a__byte_cnt == multi_mode_tx_baseband__u_mac_a__payload_len_q - 16'd1 && multi_mode_tx_baseband__u_mac_a__bit_in_byte == 3'd6))
                             multi_mode_tx_baseband__u_mac_a__sym_cnt <= 8'd0;
                         else
                             multi_mode_tx_baseband__u_mac_a__sym_cnt <= multi_mode_tx_baseband__u_mac_a__sym_cnt + 8'd1;
 
-                        if (!multi_mode_tx_baseband__u_mac_a__rate_q) begin
+                        if (!multi_mode_tx_baseband__u_mac_a__rate_mode_q[0]) begin
                             multi_mode_tx_baseband__u_mac_a__byte_sr     <= {1'b0, multi_mode_tx_baseband__u_mac_a__byte_sr[7:1]};
                             multi_mode_tx_baseband__u_mac_a__bit_in_byte <= multi_mode_tx_baseband__u_mac_a__bit_in_byte + 3'd1;
                             if (multi_mode_tx_baseband__u_mac_a__bit_in_byte == 3'd7) begin
@@ -636,12 +723,38 @@ reg [31:0] multi_mode_tx_baseband__u_mac_a__u_fcs__state;
                 multi_mode_tx_baseband__u_mac_a__S_FCS_BARKER: begin
                     if (multi_mode_tx_baseband__u_mac_a__symbol_end) begin
                         multi_mode_tx_baseband__u_mac_a__sym_cnt <= multi_mode_tx_baseband__u_mac_a__sym_cnt + 8'd1;
-                        if (!multi_mode_tx_baseband__u_mac_a__rate_q) begin
+                        if (!multi_mode_tx_baseband__u_mac_a__rate_mode_q[0]) begin
                             if (multi_mode_tx_baseband__u_mac_a__sym_cnt == 8'd0) multi_mode_tx_baseband__u_mac_a__fcs_sr <= {1'b0, multi_mode_tx_baseband__u_mac_a__fcs_out[31:1]};
                             else                 multi_mode_tx_baseband__u_mac_a__fcs_sr <= {1'b0, multi_mode_tx_baseband__u_mac_a__fcs_sr[31:1]};
                         end else begin
                             if (multi_mode_tx_baseband__u_mac_a__sym_cnt == 8'd0) multi_mode_tx_baseband__u_mac_a__fcs_sr <= {2'b00, multi_mode_tx_baseband__u_mac_a__fcs_out[31:2]};
                             else                 multi_mode_tx_baseband__u_mac_a__fcs_sr <= {2'b00, multi_mode_tx_baseband__u_mac_a__fcs_sr[31:2]};
+                        end
+                    end
+                end
+
+                multi_mode_tx_baseband__u_mac_a__S_PSDU_CCK: begin
+                    // Concurrent prefetch: while chips 0..3 of the CURRENT
+                    // symbol emit, pull bytes 0..3 of the NEXT symbol from
+                    // the FIFO.  Skip on the final symbol.
+                    if (multi_mode_tx_baseband__u_mac_a__cck_sym_cnt < multi_mode_tx_baseband__u_mac_a__cck_sym_count_q - 16'd1 && multi_mode_tx_baseband__u_mac_a__chip_cnt <= 4'd3) begin
+                        if (!fifo_empty) begin
+                            case (multi_mode_tx_baseband__u_mac_a__chip_cnt[1:0])
+                                2'd0: multi_mode_tx_baseband__u_mac_a__cck_word_next[7:0]   <= fifo_rd_data;
+                                2'd1: multi_mode_tx_baseband__u_mac_a__cck_word_next[15:8]  <= fifo_rd_data;
+                                2'd2: multi_mode_tx_baseband__u_mac_a__cck_word_next[23:16] <= fifo_rd_data;
+                                2'd3: multi_mode_tx_baseband__u_mac_a__cck_word_next[31:24] <= fifo_rd_data;
+                            endcase
+                            a_fifo_rd_en <= 1'b1;
+                        end else begin
+                            a_underrun <= 1'b1;
+                        end
+                    end
+
+                    if (multi_mode_tx_baseband__u_mac_a__symbol_end) begin
+                        if (multi_mode_tx_baseband__u_mac_a__cck_sym_cnt < multi_mode_tx_baseband__u_mac_a__cck_sym_count_q - 16'd1) begin
+                            multi_mode_tx_baseband__u_mac_a__cck_word_curr <= multi_mode_tx_baseband__u_mac_a__cck_word_next;
+                            multi_mode_tx_baseband__u_mac_a__cck_sym_cnt   <= multi_mode_tx_baseband__u_mac_a__cck_sym_cnt + 16'd1;
                         end
                     end
                 end
@@ -676,6 +789,7 @@ reg [1:0] multi_mode_tx_baseband__u_phy_a__phi1_acc;
 // ---------------------------------------------------------------------------
 assign multi_mode_tx_baseband__u_phy_a__chip_i_c = ~multi_mode_tx_baseband__u_phy_a__chip_phase[0];        // multi_mode_tx_baseband__u_phy_a__chip_phase[0]=0 -> +1, multi_mode_tx_baseband__u_phy_a__chip_phase[0]=1 -> -1
     assign multi_mode_tx_baseband__u_phy_a__chip_q_c = ~multi_mode_tx_baseband__u_phy_a__chip_phase[1];        // multi_mode_tx_baseband__u_phy_a__chip_phase[1]=0 -> +1, multi_mode_tx_baseband__u_phy_a__chip_phase[1]=1 -> -1
+
     always @(posedge clk_b_chip or negedge rst_n_b_chip_s) begin
         if (!rst_n_b_chip_s) begin
             multi_mode_tx_baseband__u_phy_a__phi1_acc   <= 2'd0;
@@ -695,6 +809,7 @@ assign multi_mode_tx_baseband__u_phy_a__chip_i_c = ~multi_mode_tx_baseband__u_ph
             end
         end
     end
+
     assign fifo_rd_en   = a_fifo_rd_en;
     assign chip_i       = a_chip_i;
     assign chip_q       = a_chip_q;
@@ -722,6 +837,7 @@ reg [1-1:0] multi_mode_tx_baseband__u_busy_sync__meta_q;
     end
 
     assign tx_busy = multi_mode_tx_baseband__u_busy_sync__sync_q;
+
     wire done_a_mcu;
 // ---------------------------------------------------------------------------
 // Inlined pulse_sync instance: multi_mode_tx_baseband__u_done_a
@@ -750,6 +866,7 @@ reg [1-1:0] multi_mode_tx_baseband__u_done_a__u_sync__meta_q;
     end
 
     assign multi_mode_tx_baseband__u_done_a__toggle_dst = multi_mode_tx_baseband__u_done_a__u_sync__sync_q;
+
     reg multi_mode_tx_baseband__u_done_a__toggle_dst_q;
     always @(posedge clk_mcu or negedge rst_n_mcu_s) begin
         if (!rst_n_mcu_s) multi_mode_tx_baseband__u_done_a__toggle_dst_q <= 1'b0;
@@ -757,6 +874,7 @@ reg [1-1:0] multi_mode_tx_baseband__u_done_a__u_sync__meta_q;
     end
 
     assign done_a_mcu = multi_mode_tx_baseband__u_done_a__toggle_dst ^ multi_mode_tx_baseband__u_done_a__toggle_dst_q;
+
     assign tx_done = done_a_mcu;
 
     wire a_ur_mcu;
@@ -777,6 +895,7 @@ reg [1-1:0] multi_mode_tx_baseband__u_ur_a_sync__meta_q;
     end
 
     assign a_ur_mcu = multi_mode_tx_baseband__u_ur_a_sync__sync_q;
+
     assign underrun = a_ur_mcu;
 
     // =======================================================================
@@ -813,4 +932,3 @@ reg [1-1:0] multi_mode_tx_baseband__u_ur_a_sync__meta_q;
 `endif
 
 endmodule
-

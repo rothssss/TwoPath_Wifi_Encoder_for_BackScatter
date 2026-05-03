@@ -1,111 +1,168 @@
-# Wi-Fi-Only TX Architecture
+# Wi-Fi TX Architecture (1/2 Mbps on chip + 5.5/11 Mbps via MCU offload)
 
 This document describes the current architecture of `multi_mode_tx_baseband`
-after the Wi-Fi-only area-reduction cut.
+after re-adding 5.5 / 11 Mbps CCK with the MCU-offload contract.
 
 ## Supported modes
 
-Only two commercial-`802.11b`-facing modes remain:
+All four standards-compliant 802.11b PSDU rates are supported:
 
-| `mod_config` | Mode                          | Output pins              |
-|--------------|-------------------------------|--------------------------|
-| `4'b0000`    | `1 Mbps` DBPSK + Barker       | `chip_i`, `chip_q`       |
-| `4'b0001`    | `2 Mbps` DQPSK + Barker       | `chip_i`, `chip_q`       |
+| `mod_config` | Mode                       | Computation split            |
+|--------------|----------------------------|------------------------------|
+| `4'b0000`    | 1   Mbps DBPSK + Barker    | chip computes everything     |
+| `4'b0001`    | 2   Mbps DQPSK + Barker    | chip computes everything     |
+| `4'b0010`    | 5.5 Mbps CCK               | MCU encodes; chip streams    |
+| `4'b0011`    | 11  Mbps CCK               | MCU encodes; chip streams    |
 
-All other `mod_config` values are illegal. The chip refuses to start and
-latches `invalid_mode`.
+All other `mod_config` values are illegal and latch `invalid_mode`.
 
-## What was removed
+The chip-side output is `chip_i / chip_q / chip_valid` at 11 Mchip/s for
+every mode. The deprecated `symbol_out[7:0]` / `symbol_valid` pins are
+retained for wrapper-pinout stability and remain tied to 0.
 
-The cut intentionally removes the largest nonessential blocks while keeping the
-retained modes standards-facing:
+## Why offload CCK
 
-- custom Path B modulation
-- `5.5 Mbps` CCK
-- `11 Mbps` CCK
-- the read-clock mux
-- the MCU-supplied `length_us` dependency
-- all CCK symbol packing and off-chip CCK precompute logic
+A full on-chip CCK encoder would add the largest non-Path-A area in the
+design: dibit-to-phase tables, a 4-input mod-4 phase adder per chip, a
+per-symbol +pi accumulator (sec 16.4.6.3 odd-symbol correction), and the
+hard-wired +pi on chips 3 and 6 (sec 16.4.6). Mentor's constraint is
+chip area, so all of that math now lives in MCU firmware.
 
-Deprecated top-level pins are still present only to avoid a wrapper-level
-pinout break:
+The chip-side cost of CCK in this architecture is roughly:
 
-- `clk_custom`
-- `length_us`
-- `symbol_out[7:0]`
-- `symbol_valid`
+  - one new FSM state (`S_PSDU_CCK`),
+  - two 32-bit prefetch registers (`cck_word_curr` / `cck_word_next`),
+  - a 4:1 chip-phase mux,
+  - the `length_field` / `service_field` / `cck_symbol_count` per-packet
+    inputs.
 
-They no longer affect the synthesized logic.
+`phy_a_rotator` is unchanged; its `base_phase` / `delta_phi1` interface
+was always built CCK-aware.
 
-## Current datapath
+## Datapath
 
 ```text
-MCU payload bytes
+MCU payload bytes  (raw payload at 1/2 Mbps; precomputed CCK words at 5.5/11)
   -> async FIFO (clk_mcu -> clk_b_chip)
   -> mac_fsm_80211b
   -> phy_a_rotator
   -> chip_i / chip_q / chip_valid
 ```
 
-There is now exactly one active transmit path.
+There is exactly one active transmit path. The FIFO read side is
+hard-wired to `clk_b_chip`.
 
-## Path A framing
-
-The transmitter still emits Long PLCP framing:
+## PLCP framing (Long preamble, all rates)
 
 ```text
-SYNC(128) | SFD(16) | SIGNAL(8) | SERVICE(8) | LENGTH(16) | HEC(16) | PSDU | FCS(32)
+SYNC(128) | SFD(16) | SIGNAL(8) | SERVICE(8) | LENGTH(16) | HEC(16) | PSDU | FCS
 ```
 
-Preamble and header are always `1 Mbps` DBPSK + Barker, which matches the
-commercial `802.11b` receive expectation for Long PLCP.
+Preamble + header are always 1 Mbps DBPSK + Barker. The MCU controls
+the SIGNAL byte (selected by `rate_mode`), SERVICE byte
+(`service_field`, including LENGTH_EXTENSION bit 7 and LOCKED_CLOCKS
+bit 2) and LENGTH field (`length_field`).
 
-For the retained modes:
+## Path A internals (1 / 2 Mbps)
 
-- `1 Mbps`: PSDU and FCS use DBPSK + Barker
-- `2 Mbps`: PSDU and FCS use DQPSK + Barker
+For `rate_mode = 2'b00` or `2'b01` the chip-side path is unchanged:
 
-## On-chip functions still present
+  - self-synchronous scrambler (sec 16.2.4, multiplicative form),
+  - on-chip CRC-16 HEC and CRC-32 FCS,
+  - DBPSK / DQPSK differential phase mapping,
+  - 11-chip Barker spreading,
+  - chip-domain phase rotator.
 
-To keep the retained modes self-contained and standards-facing, these blocks
-remain on chip:
+The MCU pushes raw payload bytes into the FIFO and supplies
+`payload_len` (raw payload byte count), `length_field`
+(`8 * payload_len` for 1 Mbps, `4 * payload_len` for 2 Mbps), and
+`service_field`. `cck_symbol_count` is unused.
 
-- self-synchronous scrambler
-- CRC-16 HEC for the PLCP header
-- CRC-32 FCS for the PSDU
-- DQPSK differential phase mapping
-- Barker spreading
-- chip-domain phase rotator
+## Path A internals (5.5 / 11 Mbps CCK)
 
-## LENGTH field generation
+For `rate_mode = 2'b1x` the MCU performs the heavy work:
 
-Because only `1 Mbps` and `2 Mbps` remain, LENGTH is cheap to compute on chip:
+  - scramble payload + FCS bits per sec 16.2.4,
+  - compute CRC-32 over the scrambled payload (sec 16.2.3.6),
+  - CCK-encode the bitstream into 8-chip QPSK symbols per sec 16.4.6,
+  - fold the chip-3 / chip-6 +pi into each `c_k`,
+  - fold the odd-symbol +pi into `delta_phi1` per sec 16.4.6.3,
+  - compute LENGTH (`length_field`), SERVICE (`service_field`,
+    incl. LENGTH_EXTENSION rule from sec 16.2.3.4), and the count of
+    8-chip symbols (`cck_symbol_count`).
 
-- `1 Mbps`: `LENGTH = 8 * payload_len`
-- `2 Mbps`: `LENGTH = 4 * payload_len`
+The chip-side does only:
 
-This removes the previous need for MCU-supplied `length_us`.
+  - generate SYNC / SFD / SIGNAL / SERVICE / LENGTH / HEC at 1 Mbps
+    DBPSK + Barker,
+  - prefetch the first CCK symbol's 4 bytes during HEC's last symbol,
+  - in `S_PSDU_CCK`, replay 8 QPSK chips per CCK symbol from
+    `cck_word_curr`, while concurrently prefetching the next symbol's
+    4 bytes during chips 0..3,
+  - drive `chip_valid` for `cck_symbol_count * 8` chips,
+  - assert `tx_done` at packet end.
+
+## CCK FIFO packing (per symbol)
+
+4 bytes per CCK symbol, LSB-first across the 4 bytes:
+
+```
+bits[1:0]    = delta_phi1[1:0]
+bits[3:2]    = c_k0[1:0]
+bits[5:4]    = c_k1[1:0]
+bits[7:6]    = c_k2[1:0]
+bits[9:8]    = c_k3[1:0]   (already includes the chip-3 +pi)
+bits[11:10]  = c_k4[1:0]
+bits[13:12]  = c_k5[1:0]
+bits[15:14]  = c_k6[1:0]   (already includes the chip-6 +pi)
+bits[17:16]  = c_k7[1:0]
+bits[31:18]  = reserved (MCU writes 0)
+```
+
+Sustained FIFO bandwidth in CCK = `4 bytes/sym * 1.375 Msym/s = 5.5 MB/s`.
 
 ## FIFO contract
 
-The FIFO is now smaller by default:
+  - Default depth: `16` bytes (`FIFO_ADDR_W = 4`). Holds ~3 us of CCK
+    burst at peak; very generous for 1/2 Mbps. Bumped from 8 because
+    CCK's 5.5 MB/s sustained rate eats the previous buffer in ~1 us.
+  - Write port is `clk_mcu`, read port is `clk_b_chip`.
+  - Standard back-pressure via `fifo_full`; underrun via `underrun`.
 
-- old default: `32` bytes
-- new default: `8` bytes
+## On-chip blocks still present
 
-The FIFO still bridges `clk_mcu` to `clk_b_chip`, so the MCU must keep up with
-the selected on-air rate or the design can still assert `underrun`.
+  - self-synchronous scrambler (`scrambler_x7x4` and inline copy in
+    `mac_fsm_80211b`)
+  - CRC-16 HEC for the PLCP header
+  - CRC-32 FCS for the PSDU (Barker rates only; idle in CCK)
+  - DBPSK / DQPSK differential phase mapping
+  - 11-chip Barker spreader
+  - chip-domain QPSK phase rotator (`phy_a_rotator`)
+  - new CCK symbol streamer + prefetch buffer
 
 ## Verification scope
 
-The active benches now cover:
+Active testbenches now cover:
 
-- illegal-mode rejection
-- `1 Mbps` DBPSK packet flow
-- `2 Mbps` DQPSK packet flow
-- FIFO byte alignment
-- DQPSK differential mapping
-- on-chip LENGTH-field generation
+  - illegal-mode rejection
+  - 1 Mbps DBPSK packet flow
+  - 2 Mbps DQPSK packet flow
+  - 5.5 Mbps CCK chip-count geometry (stub, all-zero MCU words)
+  - 11 Mbps CCK chip-count geometry (stub, all-zero MCU words)
+  - FIFO byte alignment (Barker)
+  - DQPSK differential mapping
+  - on-chip header construction (Barker)
+  - back-to-back packet cleanup
 
-Legacy Path B and CCK collateral is retained only as historical reference and
-is no longer part of the active top-level architecture.
+Bit-level golden-vector validation of the CCK chip stream against an
+802.11-compliant reference encoder is the next verification deliverable
+and is **not yet present** in this repo.
+
+## Synthesis handoff
+
+  - Hierarchical: `rtl/multi_mode_tx_baseband.v` and submodules.
+  - Single-module flattened: `synth/rtl_flat/multi_mode_tx_baseband_flat.v`,
+    auto-regenerated from `multi_mode_tx_baseband_flat_multimodule.v` by
+    `synth/rtl_flat/gen_single_module_flat.py` (the original
+    PowerShell script `gen_single_module_flat.ps1` is preserved
+    alongside).

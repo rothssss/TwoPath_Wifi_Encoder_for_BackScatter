@@ -6,11 +6,14 @@ module tb_mac_fsm_80211b_checks;
     localparam [2:0]   S_HEAD        = 3'd3;
     localparam [2:0]   S_PSDU_BARKER = 3'd5;
 
-    reg         clk         = 1'b0;
-    reg         rst_n       = 1'b0;
-    reg         start_pulse = 1'b0;
-    reg         rate        = 1'b0;
-    reg  [15:0] payload_len = 16'd0;
+    reg         clk              = 1'b0;
+    reg         rst_n            = 1'b0;
+    reg         start_pulse      = 1'b0;
+    reg  [1:0]  rate_mode        = 2'b00;
+    reg  [15:0] payload_len      = 16'd0;
+    reg  [15:0] length_field     = 16'd0;
+    reg  [7:0]  service_field    = 8'd0;
+    reg  [15:0] cck_symbol_count = 16'd0;
 
     wire        busy;
     wire        done_pulse;
@@ -32,21 +35,24 @@ module tb_mac_fsm_80211b_checks;
     mac_fsm_80211b #(
         .SCRAMBLER_SEED(7'h5D)
     ) dut (
-        .clk          (clk),
-        .rst_n        (rst_n),
-        .start_pulse  (start_pulse),
-        .rate         (rate),
-        .payload_len  (payload_len),
-        .busy         (busy),
-        .done_pulse   (done_pulse),
-        .fifo_rd_en   (fifo_rd_en),
-        .fifo_empty   (fifo_empty),
-        .fifo_rd_data (fifo_rd_data),
-        .underrun_flag(underrun_flag),
-        .base_phase   (base_phase),
-        .delta_phi1   (delta_phi1),
-        .update_phi1  (update_phi1),
-        .chip_valid   (chip_valid)
+        .clk             (clk),
+        .rst_n           (rst_n),
+        .start_pulse     (start_pulse),
+        .rate_mode       (rate_mode),
+        .payload_len     (payload_len),
+        .length_field    (length_field),
+        .service_field   (service_field),
+        .cck_symbol_count(cck_symbol_count),
+        .busy            (busy),
+        .done_pulse      (done_pulse),
+        .fifo_rd_en      (fifo_rd_en),
+        .fifo_empty      (fifo_empty),
+        .fifo_rd_data    (fifo_rd_data),
+        .underrun_flag   (underrun_flag),
+        .base_phase      (base_phase),
+        .delta_phi1      (delta_phi1),
+        .update_phi1     (update_phi1),
+        .chip_valid      (chip_valid)
     );
 
     always #(CLK_T/2) clk = ~clk;
@@ -152,12 +158,15 @@ module tb_mac_fsm_80211b_checks;
     task automatic do_reset;
         integer i;
         begin
-            rst_n       = 1'b0;
-            start_pulse = 1'b0;
-            rate        = 1'b0;
-            payload_len = 16'd0;
-            fifo_size   = 0;
-            rptr        = 0;
+            rst_n            = 1'b0;
+            start_pulse      = 1'b0;
+            rate_mode        = 2'b00;
+            payload_len      = 16'd0;
+            length_field     = 16'd0;
+            service_field    = 8'd0;
+            cck_symbol_count = 16'd0;
+            fifo_size        = 0;
+            rptr             = 0;
             for (i = 0; i < 64; i = i + 1) fifo_mem[i] = 8'h00;
             repeat (4) @(posedge clk);
             rst_n = 1'b1;
@@ -181,11 +190,12 @@ module tb_mac_fsm_80211b_checks;
         begin
             $display("\n--- test_barker_fifo_alignment ---");
             do_reset();
-            rate        = 1'b0;
-            payload_len = 16'd2;
-            fifo_size   = 2;
-            fifo_mem[0] = 8'hA1;
-            fifo_mem[1] = 8'hB2;
+            rate_mode    = 2'b00;
+            payload_len  = 16'd2;
+            length_field = 16'd16;  // 1 Mbps: 8 * 2
+            fifo_size    = 2;
+            fifo_mem[0]  = 8'hA1;
+            fifo_mem[1]  = 8'hB2;
             pulse_start();
 
             saw_first  = 1'b0;
@@ -225,7 +235,7 @@ module tb_mac_fsm_80211b_checks;
             exp_delta   = ref_dqpsk_delta(s0, s1);
 
             force dut.state         = S_PSDU_BARKER;
-            force dut.rate_q        = 1'b1;
+            force dut.rate_mode_q   = 2'b01;
             force dut.payload_len_q = 16'd2;
             force dut.byte_cnt      = 16'd0;
             force dut.bit_in_byte   = 3'd0;
@@ -236,7 +246,7 @@ module tb_mac_fsm_80211b_checks;
             expect_eq2("delta_phi1 for legal-seed DQPSK symbol", delta_phi1, exp_delta);
             expect_true("update_phi1 asserted for forced DQPSK symbol", update_phi1);
             release dut.state;
-            release dut.rate_q;
+            release dut.rate_mode_q;
             release dut.payload_len_q;
             release dut.byte_cnt;
             release dut.bit_in_byte;
@@ -252,8 +262,10 @@ module tb_mac_fsm_80211b_checks;
         begin
             $display("\n--- test_header_length_dbpsk ---");
             do_reset();
-            rate        = 1'b0;
-            payload_len = 16'd3;
+            rate_mode    = 2'b00;
+            payload_len  = 16'd3;
+            length_field = 16'd24;   // 1 Mbps: 8 * 3
+            service_field = 8'h00;
             pulse_start();
 
             saw_head = 1'b0;
@@ -276,8 +288,10 @@ module tb_mac_fsm_80211b_checks;
         begin
             $display("\n--- test_header_length_dqpsk ---");
             do_reset();
-            rate        = 1'b1;
-            payload_len = 16'd3;
+            rate_mode    = 2'b01;
+            payload_len  = 16'd3;
+            length_field = 16'd12;   // 2 Mbps: 4 * 3
+            service_field = 8'h00;
             pulse_start();
 
             saw_head = 1'b0;
