@@ -498,7 +498,7 @@ reg [15:0] multi_mode_tx_baseband__u_mac_a__u_hec__state;
     always @(posedge clk_b_chip or negedge rst_n_b_chip_s) begin
         if (!rst_n_b_chip_s)           multi_mode_tx_baseband__u_mac_a__u_hec__state <= 16'hFFFF;
         else if (multi_mode_tx_baseband__u_mac_a__crc_init)        multi_mode_tx_baseband__u_mac_a__u_hec__state <= 16'hFFFF;
-        else if (multi_mode_tx_baseband__u_mac_a__symbol_start & multi_mode_tx_baseband__u_mac_a__feed_hec_c)  multi_mode_tx_baseband__u_mac_a__u_hec__state <= multi_mode_tx_baseband__u_mac_a__u_hec__state_next;
+        else if ((multi_mode_tx_baseband__u_mac_a__symbol_start & multi_mode_tx_baseband__u_mac_a__feed_hec_c))  multi_mode_tx_baseband__u_mac_a__u_hec__state <= multi_mode_tx_baseband__u_mac_a__u_hec__state_next;
     end
 
     assign multi_mode_tx_baseband__u_mac_a__hec_out = multi_mode_tx_baseband__u_mac_a__u_hec__state ^ 16'hFFFF;
@@ -516,15 +516,15 @@ reg [15:0] multi_mode_tx_baseband__u_mac_a__u_hec__state;
 reg [31:0] multi_mode_tx_baseband__u_mac_a__u_fcs__state;
 
     // Next-multi_mode_tx_baseband__u_mac_a__u_fcs__state logic: reflected CRC-32 update.
-    //   x = multi_mode_tx_baseband__u_mac_a__u_fcs__state[0] XOR multi_mode_tx_baseband__u_mac_a__fcs_feed_second_cycle ? multi_mode_tx_baseband__u_mac_a__raw_bit2_c : multi_mode_tx_baseband__u_mac_a__raw_bit_c
+    //   x = multi_mode_tx_baseband__u_mac_a__u_fcs__state[0] XOR (multi_mode_tx_baseband__u_mac_a__fcs_feed_second_cycle ? multi_mode_tx_baseband__u_mac_a__raw_bit2_c : multi_mode_tx_baseband__u_mac_a__raw_bit_c)
     //   state_next = (multi_mode_tx_baseband__u_mac_a__u_fcs__state >> 1) XOR (x ? 0xEDB88320 : 0)
-    wire        multi_mode_tx_baseband__u_mac_a__u_fcs__fb = multi_mode_tx_baseband__u_mac_a__u_fcs__state[0] ^ multi_mode_tx_baseband__u_mac_a__fcs_feed_second_cycle ? multi_mode_tx_baseband__u_mac_a__raw_bit2_c : multi_mode_tx_baseband__u_mac_a__raw_bit_c;
+    wire        multi_mode_tx_baseband__u_mac_a__u_fcs__fb = multi_mode_tx_baseband__u_mac_a__u_fcs__state[0] ^ (multi_mode_tx_baseband__u_mac_a__fcs_feed_second_cycle ? multi_mode_tx_baseband__u_mac_a__raw_bit2_c : multi_mode_tx_baseband__u_mac_a__raw_bit_c);
     wire [31:0] multi_mode_tx_baseband__u_mac_a__u_fcs__state_next_data = (multi_mode_tx_baseband__u_mac_a__u_fcs__state >> 1) ^ (multi_mode_tx_baseband__u_mac_a__u_fcs__fb ? 32'hEDB88320 : 32'h00000000);
 
     always @(posedge clk_b_chip or negedge rst_n_b_chip_s) begin
         if (!rst_n_b_chip_s)           multi_mode_tx_baseband__u_mac_a__u_fcs__state <= 32'hFFFFFFFF;
         else if (multi_mode_tx_baseband__u_mac_a__crc_init)        multi_mode_tx_baseband__u_mac_a__u_fcs__state <= 32'hFFFFFFFF;
-        else if ((multi_mode_tx_baseband__u_mac_a__symbol_start & multi_mode_tx_baseband__u_mac_a__feed_fcs_c) | multi_mode_tx_baseband__u_mac_a__fcs_feed_second_cycle)  multi_mode_tx_baseband__u_mac_a__u_fcs__state <= multi_mode_tx_baseband__u_mac_a__u_fcs__state_next_data;
+        else if (((multi_mode_tx_baseband__u_mac_a__symbol_start & multi_mode_tx_baseband__u_mac_a__feed_fcs_c) | multi_mode_tx_baseband__u_mac_a__fcs_feed_second_cycle))  multi_mode_tx_baseband__u_mac_a__u_fcs__state <= multi_mode_tx_baseband__u_mac_a__u_fcs__state_next_data;
     end
 
     assign multi_mode_tx_baseband__u_mac_a__fcs_out = multi_mode_tx_baseband__u_mac_a__u_fcs__state ^ 32'hFFFFFFFF;

@@ -140,9 +140,21 @@ def convert_module(
         value = param_map.get(pname, default)
         body = replace_word(body, pname, value)
 
+    # When inlining a port reference in the child body, wrap the connection
+    # expression in parentheses unless it is a single identifier or a number.
+    # Without this, an instantiation like `.data_bit (a ? b : c)` becomes
+    # `state[0] ^ a ? b : c` after substitution -- which Verilog parses as
+    # `(state[0] ^ a) ? b : c` because `^` outranks `?:`.  That silently
+    # corrupted the CRC-32 FCS (state[0] ^ data_bit) at 1/2 Mbps.
+    _IDENT_OR_NUM = re.compile(r"^\s*([A-Za-z_][A-Za-z0-9_$]*|\d+(?:'[bBhHdDoO]?[0-9A-Fa-f_xXzZ]+)?)\s*$")
     for port in mod["ports"]:
         if port in conn_map:
-            body = replace_word(body, port, conn_map[port])
+            conn = conn_map[port]
+            if _IDENT_OR_NUM.match(conn):
+                replacement = conn
+            else:
+                replacement = f"({conn})"
+            body = replace_word(body, port, replacement)
 
     body = inline_instances(modules, body, prefix, top_module)
     return (
