@@ -549,7 +549,7 @@ module mac_fsm_80211b #(
     output reg         busy,
     output reg         done_pulse,
 
-    output reg         fifo_rd_en,
+    output wire        fifo_rd_en,
     input  wire        fifo_empty,
     input  wire [7:0]  fifo_rd_data,
     output reg         underrun_flag,
@@ -729,22 +729,52 @@ module mac_fsm_80211b #(
     wire barker_chip_bit       = BARKER_PATTERN[10 - chip_cnt[3:0]];
     wire [1:0] base_phase_barker = barker_chip_bit ? 2'b00 : 2'b10;
 
-    // CCK chip-phase mux: select c_k for the current chip from cck_word_curr.
-    reg [1:0] cck_chip_phase;
-    always @(*) begin
-        case (chip_cnt[2:0])
-            3'd0:   cck_chip_phase = cck_word_curr[3:2];
-            3'd1:   cck_chip_phase = cck_word_curr[5:4];
-            3'd2:   cck_chip_phase = cck_word_curr[7:6];
-            3'd3:   cck_chip_phase = cck_word_curr[9:8];
-            3'd4:   cck_chip_phase = cck_word_curr[11:10];
-            3'd5:   cck_chip_phase = cck_word_curr[13:12];
-            3'd6:   cck_chip_phase = cck_word_curr[15:14];
-            3'd7:   cck_chip_phase = cck_word_curr[17:16];
-            default:cck_chip_phase = 2'd0;
-        endcase
-    end
+    // CCK chip-phase mux: pick c_k[chip_cnt] from cck_word_curr.
+    // Layout (LSB-first): [delta=1:0][c0=3:2][c1=5:4]...[c7=17:16].
+    // Indexed part-select keeps this one expression and avoids the
+    // always_comb / case event-ordering ambiguity the earlier version had.
+    wire [1:0] cck_chip_phase = cck_word_curr[2 + (chip_cnt[2:0] << 1) +: 2];
     wire [1:0] cck_delta_phi1 = cck_word_curr[1:0];
+
+    // -----------------------------------------------------------------------
+    // Combinational FIFO read-enable.
+    //
+    // fifo_rd_en MUST be combinational so the async FWFT FIFO can advance
+    // its rptr on the SAME edge the MAC captures the byte, not a cycle
+    // later.  When fifo_rd_en was driven NBA inside the seq always, the
+    // FIFO saw the request one cycle late and CCK's 4-consecutive-cycle
+    // prefetch ended up reading byte 0 twice and dropping byte 3.
+    // -----------------------------------------------------------------------
+    wire cck_active_in = rate_mode_q[1];
+
+    wire fifo_rd_en_barker_hec_end =
+        (state == S_HEC) && !cck_active_in &&
+        (sym_cnt == 8'd15) && symbol_end &&
+        (payload_len_q != 16'd0) && (payload_len_q > 16'd1);
+
+    wire fifo_rd_en_barker_psdu =
+        (state == S_PSDU_BARKER) && symbol_end &&
+        (((!rate_mode_q[0]) && (bit_in_byte == 3'd7)) ||
+         (( rate_mode_q[0]) && (bit_in_byte == 3'd6))) &&
+        (byte_cnt != payload_len_q - 16'd1) &&
+        (byte_cnt != payload_len_q - 16'd2);
+
+    wire fifo_rd_en_cck_hec_pre =
+        (state == S_HEC) && cck_active_in &&
+        (sym_cnt == 8'd15) &&
+        (chip_cnt >= 4'd4) && (chip_cnt <= 4'd7) &&
+        (cck_sym_count_q != 16'd0);
+
+    wire fifo_rd_en_cck_psdu_pre =
+        (state == S_PSDU_CCK) &&
+        (cck_sym_cnt < cck_sym_count_q - 16'd1) &&
+        (chip_cnt <= 4'd3);
+
+    assign fifo_rd_en = !fifo_empty &&
+                        (fifo_rd_en_barker_hec_end |
+                         fifo_rd_en_barker_psdu    |
+                         fifo_rd_en_cck_hec_pre    |
+                         fifo_rd_en_cck_psdu_pre);
 
     crc16_80211_hec u_hec (
         .clk       (clk),
@@ -837,7 +867,6 @@ module mac_fsm_80211b #(
             cck_word_next      <= 32'd0;
             lfsr               <= SCRAMBLER_SEED;
             crc_init           <= 1'b0;
-            fifo_rd_en         <= 1'b0;
             underrun_flag      <= 1'b0;
             base_phase         <= 2'd0;
             delta_phi1         <= 2'd0;
@@ -847,7 +876,6 @@ module mac_fsm_80211b #(
             done_pulse         <= 1'b0;
         end else begin
             state       <= state_next;
-            fifo_rd_en  <= 1'b0;
             crc_init    <= 1'b0;
             done_pulse  <= 1'b0;
             update_phi1 <= 1'b0;
@@ -924,7 +952,6 @@ module mac_fsm_80211b #(
                                 2'd2: cck_word_next[23:16] <= fifo_rd_data;
                                 2'd3: cck_word_next[31:24] <= fifo_rd_data;
                             endcase
-                            fifo_rd_en <= 1'b1;
                         end else begin
                             underrun_flag <= 1'b1;
                         end
@@ -942,7 +969,6 @@ module mac_fsm_80211b #(
                             end else if (payload_len_q != 16'd0) begin
                                 if (!fifo_empty) begin
                                     byte_sr <= fifo_rd_data;
-                                    if (payload_len_q > 16'd1) fifo_rd_en <= 1'b1;
                                 end else begin
                                     underrun_flag <= 1'b1;
                                 end
@@ -967,8 +993,6 @@ module mac_fsm_80211b #(
                                 if (byte_cnt != payload_len_q - 16'd1) begin
                                     if (!fifo_empty) begin
                                         byte_sr <= fifo_rd_data;
-                                        if (byte_cnt != payload_len_q - 16'd2)
-                                            fifo_rd_en <= 1'b1;
                                     end else begin
                                         underrun_flag <= 1'b1;
                                     end
@@ -982,8 +1006,6 @@ module mac_fsm_80211b #(
                                 if (byte_cnt != payload_len_q - 16'd1) begin
                                     if (!fifo_empty) begin
                                         byte_sr <= fifo_rd_data;
-                                        if (byte_cnt != payload_len_q - 16'd2)
-                                            fifo_rd_en <= 1'b1;
                                     end else begin
                                         underrun_flag <= 1'b1;
                                     end
@@ -1018,7 +1040,6 @@ module mac_fsm_80211b #(
                                 2'd2: cck_word_next[23:16] <= fifo_rd_data;
                                 2'd3: cck_word_next[31:24] <= fifo_rd_data;
                             endcase
-                            fifo_rd_en <= 1'b1;
                         end else begin
                             underrun_flag <= 1'b1;
                         end

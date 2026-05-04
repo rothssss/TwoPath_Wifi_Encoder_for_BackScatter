@@ -441,22 +441,52 @@ wire [1:0] multi_mode_tx_baseband__u_mac_a__delta_phi1_barker =
     wire multi_mode_tx_baseband__u_mac_a__barker_chip_bit       = BARKER_PATTERN[10 - multi_mode_tx_baseband__u_mac_a__chip_cnt[3:0]];
     wire [1:0] multi_mode_tx_baseband__u_mac_a__base_phase_barker = multi_mode_tx_baseband__u_mac_a__barker_chip_bit ? 2'b00 : 2'b10;
 
-    // CCK chip-phase mux: select c_k for the current chip from multi_mode_tx_baseband__u_mac_a__cck_word_curr.
-    reg [1:0] multi_mode_tx_baseband__u_mac_a__cck_chip_phase;
-    always @(*) begin
-        case (multi_mode_tx_baseband__u_mac_a__chip_cnt[2:0])
-            3'd0:   multi_mode_tx_baseband__u_mac_a__cck_chip_phase = multi_mode_tx_baseband__u_mac_a__cck_word_curr[3:2];
-            3'd1:   multi_mode_tx_baseband__u_mac_a__cck_chip_phase = multi_mode_tx_baseband__u_mac_a__cck_word_curr[5:4];
-            3'd2:   multi_mode_tx_baseband__u_mac_a__cck_chip_phase = multi_mode_tx_baseband__u_mac_a__cck_word_curr[7:6];
-            3'd3:   multi_mode_tx_baseband__u_mac_a__cck_chip_phase = multi_mode_tx_baseband__u_mac_a__cck_word_curr[9:8];
-            3'd4:   multi_mode_tx_baseband__u_mac_a__cck_chip_phase = multi_mode_tx_baseband__u_mac_a__cck_word_curr[11:10];
-            3'd5:   multi_mode_tx_baseband__u_mac_a__cck_chip_phase = multi_mode_tx_baseband__u_mac_a__cck_word_curr[13:12];
-            3'd6:   multi_mode_tx_baseband__u_mac_a__cck_chip_phase = multi_mode_tx_baseband__u_mac_a__cck_word_curr[15:14];
-            3'd7:   multi_mode_tx_baseband__u_mac_a__cck_chip_phase = multi_mode_tx_baseband__u_mac_a__cck_word_curr[17:16];
-            default:multi_mode_tx_baseband__u_mac_a__cck_chip_phase = 2'd0;
-        endcase
-    end
+    // CCK chip-phase mux: pick c_k[multi_mode_tx_baseband__u_mac_a__chip_cnt] from multi_mode_tx_baseband__u_mac_a__cck_word_curr.
+    // Layout (LSB-first): [delta=1:0][c0=3:2][c1=5:4]...[c7=17:16].
+    // Indexed part-select keeps this one expression and avoids the
+    // always_comb / case event-ordering ambiguity the earlier version had.
+    wire [1:0] multi_mode_tx_baseband__u_mac_a__cck_chip_phase = multi_mode_tx_baseband__u_mac_a__cck_word_curr[2 + (multi_mode_tx_baseband__u_mac_a__chip_cnt[2:0] << 1) +: 2];
     wire [1:0] multi_mode_tx_baseband__u_mac_a__cck_delta_phi1 = multi_mode_tx_baseband__u_mac_a__cck_word_curr[1:0];
+
+    // -----------------------------------------------------------------------
+    // Combinational FIFO read-enable.
+    //
+    // a_fifo_rd_en MUST be combinational so the async FWFT FIFO can advance
+    // its rptr on the SAME edge the MAC captures the byte, not a cycle
+    // later.  When a_fifo_rd_en was driven NBA inside the seq always, the
+    // FIFO saw the request one cycle late and CCK's 4-consecutive-cycle
+    // prefetch ended up reading byte 0 twice and dropping byte 3.
+    // -----------------------------------------------------------------------
+    wire multi_mode_tx_baseband__u_mac_a__cck_active_in = multi_mode_tx_baseband__u_mac_a__rate_mode_q[1];
+
+    wire multi_mode_tx_baseband__u_mac_a__fifo_rd_en_barker_hec_end =
+        (multi_mode_tx_baseband__u_mac_a__state == multi_mode_tx_baseband__u_mac_a__S_HEC) && !multi_mode_tx_baseband__u_mac_a__cck_active_in &&
+        (multi_mode_tx_baseband__u_mac_a__sym_cnt == 8'd15) && multi_mode_tx_baseband__u_mac_a__symbol_end &&
+        (multi_mode_tx_baseband__u_mac_a__payload_len_q != 16'd0) && (multi_mode_tx_baseband__u_mac_a__payload_len_q > 16'd1);
+
+    wire multi_mode_tx_baseband__u_mac_a__fifo_rd_en_barker_psdu =
+        (multi_mode_tx_baseband__u_mac_a__state == multi_mode_tx_baseband__u_mac_a__S_PSDU_BARKER) && multi_mode_tx_baseband__u_mac_a__symbol_end &&
+        (((!multi_mode_tx_baseband__u_mac_a__rate_mode_q[0]) && (multi_mode_tx_baseband__u_mac_a__bit_in_byte == 3'd7)) ||
+         (( multi_mode_tx_baseband__u_mac_a__rate_mode_q[0]) && (multi_mode_tx_baseband__u_mac_a__bit_in_byte == 3'd6))) &&
+        (multi_mode_tx_baseband__u_mac_a__byte_cnt != multi_mode_tx_baseband__u_mac_a__payload_len_q - 16'd1) &&
+        (multi_mode_tx_baseband__u_mac_a__byte_cnt != multi_mode_tx_baseband__u_mac_a__payload_len_q - 16'd2);
+
+    wire multi_mode_tx_baseband__u_mac_a__fifo_rd_en_cck_hec_pre =
+        (multi_mode_tx_baseband__u_mac_a__state == multi_mode_tx_baseband__u_mac_a__S_HEC) && multi_mode_tx_baseband__u_mac_a__cck_active_in &&
+        (multi_mode_tx_baseband__u_mac_a__sym_cnt == 8'd15) &&
+        (multi_mode_tx_baseband__u_mac_a__chip_cnt >= 4'd4) && (multi_mode_tx_baseband__u_mac_a__chip_cnt <= 4'd7) &&
+        (multi_mode_tx_baseband__u_mac_a__cck_sym_count_q != 16'd0);
+
+    wire multi_mode_tx_baseband__u_mac_a__fifo_rd_en_cck_psdu_pre =
+        (multi_mode_tx_baseband__u_mac_a__state == multi_mode_tx_baseband__u_mac_a__S_PSDU_CCK) &&
+        (multi_mode_tx_baseband__u_mac_a__cck_sym_cnt < multi_mode_tx_baseband__u_mac_a__cck_sym_count_q - 16'd1) &&
+        (multi_mode_tx_baseband__u_mac_a__chip_cnt <= 4'd3);
+
+    assign a_fifo_rd_en = !fifo_empty &&
+                        (multi_mode_tx_baseband__u_mac_a__fifo_rd_en_barker_hec_end |
+                         multi_mode_tx_baseband__u_mac_a__fifo_rd_en_barker_psdu    |
+                         multi_mode_tx_baseband__u_mac_a__fifo_rd_en_cck_hec_pre    |
+                         multi_mode_tx_baseband__u_mac_a__fifo_rd_en_cck_psdu_pre);
 // ---------------------------------------------------------------------------
 // Inlined crc16_80211_hec instance: multi_mode_tx_baseband__u_mac_a__u_hec
 // ---------------------------------------------------------------------------
@@ -564,7 +594,6 @@ reg [31:0] multi_mode_tx_baseband__u_mac_a__u_fcs__state;
             multi_mode_tx_baseband__u_mac_a__cck_word_next      <= 32'd0;
             multi_mode_tx_baseband__u_mac_a__lfsr               <= SCRAMBLER_SEED_A;
             multi_mode_tx_baseband__u_mac_a__crc_init           <= 1'b0;
-            a_fifo_rd_en         <= 1'b0;
             a_underrun      <= 1'b0;
             a_base_phase         <= 2'd0;
             a_delta_phi1         <= 2'd0;
@@ -574,7 +603,6 @@ reg [31:0] multi_mode_tx_baseband__u_mac_a__u_fcs__state;
             a_done         <= 1'b0;
         end else begin
             multi_mode_tx_baseband__u_mac_a__state       <= multi_mode_tx_baseband__u_mac_a__state_next;
-            a_fifo_rd_en  <= 1'b0;
             multi_mode_tx_baseband__u_mac_a__crc_init    <= 1'b0;
             a_done  <= 1'b0;
             a_update_phi1 <= 1'b0;
@@ -651,7 +679,6 @@ reg [31:0] multi_mode_tx_baseband__u_mac_a__u_fcs__state;
                                 2'd2: multi_mode_tx_baseband__u_mac_a__cck_word_next[23:16] <= fifo_rd_data;
                                 2'd3: multi_mode_tx_baseband__u_mac_a__cck_word_next[31:24] <= fifo_rd_data;
                             endcase
-                            a_fifo_rd_en <= 1'b1;
                         end else begin
                             a_underrun <= 1'b1;
                         end
@@ -669,7 +696,6 @@ reg [31:0] multi_mode_tx_baseband__u_mac_a__u_fcs__state;
                             end else if (multi_mode_tx_baseband__u_mac_a__payload_len_q != 16'd0) begin
                                 if (!fifo_empty) begin
                                     multi_mode_tx_baseband__u_mac_a__byte_sr <= fifo_rd_data;
-                                    if (multi_mode_tx_baseband__u_mac_a__payload_len_q > 16'd1) a_fifo_rd_en <= 1'b1;
                                 end else begin
                                     a_underrun <= 1'b1;
                                 end
@@ -694,8 +720,6 @@ reg [31:0] multi_mode_tx_baseband__u_mac_a__u_fcs__state;
                                 if (multi_mode_tx_baseband__u_mac_a__byte_cnt != multi_mode_tx_baseband__u_mac_a__payload_len_q - 16'd1) begin
                                     if (!fifo_empty) begin
                                         multi_mode_tx_baseband__u_mac_a__byte_sr <= fifo_rd_data;
-                                        if (multi_mode_tx_baseband__u_mac_a__byte_cnt != multi_mode_tx_baseband__u_mac_a__payload_len_q - 16'd2)
-                                            a_fifo_rd_en <= 1'b1;
                                     end else begin
                                         a_underrun <= 1'b1;
                                     end
@@ -709,8 +733,6 @@ reg [31:0] multi_mode_tx_baseband__u_mac_a__u_fcs__state;
                                 if (multi_mode_tx_baseband__u_mac_a__byte_cnt != multi_mode_tx_baseband__u_mac_a__payload_len_q - 16'd1) begin
                                     if (!fifo_empty) begin
                                         multi_mode_tx_baseband__u_mac_a__byte_sr <= fifo_rd_data;
-                                        if (multi_mode_tx_baseband__u_mac_a__byte_cnt != multi_mode_tx_baseband__u_mac_a__payload_len_q - 16'd2)
-                                            a_fifo_rd_en <= 1'b1;
                                     end else begin
                                         a_underrun <= 1'b1;
                                     end
@@ -745,7 +767,6 @@ reg [31:0] multi_mode_tx_baseband__u_mac_a__u_fcs__state;
                                 2'd2: multi_mode_tx_baseband__u_mac_a__cck_word_next[23:16] <= fifo_rd_data;
                                 2'd3: multi_mode_tx_baseband__u_mac_a__cck_word_next[31:24] <= fifo_rd_data;
                             endcase
-                            a_fifo_rd_en <= 1'b1;
                         end else begin
                             a_underrun <= 1'b1;
                         end
